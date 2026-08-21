@@ -56,8 +56,9 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
     rclcpp::QoS ctrl_msg_qos(rclcpp::KeepAll{});
     subscriber_ = rclcpp::Node::create_subscription<ControlMessage>("control_message", ctrl_msg_qos, std::bind(&ODriveCanNode::subscriber_callback, this, _1));
 
+    srv_cb_group_ = rclcpp::Node::create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     rclcpp::QoS srv_qos(rclcpp::KeepAll{});
-    service_ = rclcpp::Node::create_service<AxisState>("request_axis_state", std::bind(&ODriveCanNode::service_callback, this, _1, _2), srv_qos.get_rmw_qos_profile());
+    service_ = rclcpp::Node::create_service<AxisState>("request_axis_state", std::bind(&ODriveCanNode::service_callback, this, _1, _2), srv_qos.get_rmw_qos_profile(), srv_cb_group_);
 
     rclcpp::QoS srv_clear_errors_qos(rclcpp::KeepAll{});
     service_clear_errors_ = rclcpp::Node::create_service<Empty>("clear_errors", std::bind(&ODriveCanNode::service_clear_errors_callback, this, _1, _2), srv_clear_errors_qos.get_rmw_qos_profile());
@@ -231,13 +232,16 @@ void ODriveCanNode::service_callback(const std::shared_ptr<AxisState::Request> r
     // wait for the procedure to complete (procedure_result != BUSY).
     std::unique_lock<std::mutex> guard(ctrl_stat_mutex_); // define lock for controller status
     auto call_time = std::chrono::steady_clock::now();
-    fresh_heartbeat_.wait(guard, [this, &call_time, &request]() {
+    const bool completed = fresh_heartbeat_.wait_for(guard, std::chrono::seconds(2), [this, &call_time, &request]() {
         bool is_busy = this->ctrl_stat_.procedure_result == ODriveProcedureResult::PROCEDURE_RESULT_BUSY;
         bool requested_closed_loop = request->axis_requested_state == ODriveAxisState::AXIS_STATE_CLOSED_LOOP_CONTROL;
         bool minimum_time_passed = (std::chrono::steady_clock::now() - call_time >= std::chrono::seconds(1));
         bool complete = (requested_closed_loop || !is_busy) && minimum_time_passed;
         return complete;
         }); // wait for procedure_result
+    if (!completed) {
+        RCLCPP_WARN(rclcpp::Node::get_logger(), "timed out waiting for heartbeat after requesting axis state %d", axis_state_);
+    }
 
     response->axis_state = ctrl_stat_.axis_state;
     response->active_errors = ctrl_stat_.active_errors;

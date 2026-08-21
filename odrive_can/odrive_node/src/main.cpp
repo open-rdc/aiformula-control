@@ -11,7 +11,11 @@ int main(int argc, char* argv[]) {
     if (!can_node->init(&event_loop)) return -1;
 
     std::thread can_event_loop([&event_loop]() { event_loop.run_until_empty(); });
-    rclcpp::spin(can_node);
+
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(can_node);
+    executor.spin();
+
     can_node->deinit();
     rclcpp::shutdown();
     return 0;

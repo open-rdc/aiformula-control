@@ -69,6 +69,7 @@ private:
     rclcpp::Subscription<ControlMessage>::SharedPtr subscriber_;
 
     EpollEvent srv_evt_;
+    rclcpp::CallbackGroup::SharedPtr srv_cb_group_;
     uint32_t axis_state_;
     std::mutex axis_state_mutex_;
     std::condition_variable fresh_heartbeat_;
