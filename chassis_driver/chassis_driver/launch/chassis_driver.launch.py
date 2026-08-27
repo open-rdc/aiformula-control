@@ -35,6 +35,13 @@ def generate_launch_description():
         parameters = [config_file_path],
         output='screen'
     )
+    # joyノードの作成
+    joy_node = Node(
+        package = 'joy',
+        executable = 'joy_node',
+        parameters = [config_file_path],
+        output='screen'
+    )
     # odrive起動の作成
     odrive_launch = launch.actions.IncludeLaunchDescription(
         AnyLaunchDescriptionSource([os.path.join(
@@ -51,6 +58,7 @@ def generate_launch_description():
     if(launch_params['socketcan'] is True):
         launch_discription.add_action(socketcan_node)
 
+    launch_discription.add_action(joy_node)
     launch_discription.add_action(chassis_driver_node)
 
     return launch_discription

@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "chassis_driver/chassis_driver_node.hpp"
+#include "controller/controller_node.hpp"
 
 int main(int argc, char * argv[]){
     rclcpp::init(argc,argv);
@@ -11,8 +12,10 @@ int main(int argc, char * argv[]){
     nodes_option.automatically_declare_parameters_from_overrides(true);
 
     auto chassis_driver_node = std::make_shared<chassis_driver::ChassisDriver>(nodes_option);
+    auto controller_node = std::make_shared<controller::Controller>(nodes_option);
 
     exec.add_node(chassis_driver_node);
+    exec.add_node(controller_node);
 
     exec.spin();
     rclcpp::shutdown();
