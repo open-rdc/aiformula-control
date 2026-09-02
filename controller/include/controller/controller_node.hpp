@@ -41,42 +41,43 @@ private:
 
     bool is_autonomous = false;
 
-    utils::UpEdge upedge_share;
-    utils::UpEdge upedge_options;
-    utils::UpEdge upedge_cross;
+    utils::UpEdge upedge_menu;
+    utils::UpEdge upedge_view;
+    utils::UpEdge upedge_b;
     utils::UpEdge upedge_l1;
     utils::UpEdge upedge_r1;
-    utils::UpEdge upedge_l2;
     utils::DownEdge downedge_l1;
     utils::DownEdge downedge_r1;
-    utils::DownEdge downedge_l2;
 
+    // xbox controller
     enum class Axes{
         L_x,
         L_y,
         R_x,
-        L2,
-        R2,
         R_y,
+        RT,
+        LT,
         left_and_right,
         up_and_down
     };
     enum class Buttons{
-        Cross,
-        Circle,
-        Triangle,
-        Rectangles,
-        L1,
-        R1,
-        L2,
-        R2,
-        Share,
-        Options,
-        PS,
-        L3,
-        R3
+        A,
+        B,
+        empty2,
+        X,
+        Y,
+        empty5,
+        LB,
+        RB,
+        empty8,
+        empty9,
+        View,
+        Menu,
+        empty12,
+        L_stick_pless,
+        R_stick_press,
+        Share
     };
-
 };
 
 }  // namespace controller

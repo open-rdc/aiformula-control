@@ -13,11 +13,7 @@ Controller::Controller(const std::string& name_space, const rclcpp::NodeOptions&
 linear_max_vel(get_parameter("linear_max_vel").as_double()),
 steering_max_angle(dtor(get_parameter("steering_max.pos").as_double()))
 {
-    _subscription_joy = this->create_subscription<sensor_msgs::msg::Joy>(
-        "joy",
-        _qos,
-        std::bind(&Controller::_subscriber_callback_joy, this, std::placeholders::_1)
-    );
+    _subscription_joy = this->create_subscription<sensor_msgs::msg::Joy>("joy", _qos, std::bind(&Controller::_subscriber_callback_joy, this, std::placeholders::_1));
 
     publisher_vel = this->create_publisher<steered_drive_msg::msg::SteeredDrive>("cmd_vel", _qos);
     publisher_restart = this->create_publisher<std_msgs::msg::Empty>("restart", _qos);
@@ -31,39 +27,36 @@ steering_max_angle(dtor(get_parameter("steering_max.pos").as_double()))
 
 void Controller::_subscriber_callback_joy(const sensor_msgs::msg::Joy::ConstSharedPtr msg){
     // 自動か手動か
-    if(upedge_share(msg->buttons[static_cast<int>(Buttons::Share)])){
+    if(upedge_menu(msg->buttons[static_cast<int>(Buttons::Menu)])){
         auto msg_autonomous = std::make_unique<std_msgs::msg::Bool>();
         msg_autonomous->data = is_autonomous = !is_autonomous;
         publisher_autonomous->publish(std::move(msg_autonomous));
         RCLCPP_INFO(this->get_logger(), "自動フラグ : %d", is_autonomous);
     }
     // リスタート
-    if(upedge_options(msg->buttons[static_cast<int>(Buttons::Options)])){
+    if(upedge_view(msg->buttons[static_cast<int>(Buttons::View)])){
         publisher_restart->publish(std::make_unique<std_msgs::msg::Empty>());
         RCLCPP_INFO(this->get_logger(), "再稼働");
     }
     // 経路選択
-    const bool l1_button = msg->buttons[static_cast<int>(Buttons::L1)];
-    const bool r1_button = msg->buttons[static_cast<int>(Buttons::R1)];
-    const bool l2_button = msg->buttons[static_cast<int>(Buttons::L2)];
+    const bool l1_button = msg->buttons[static_cast<int>(Buttons::LB)];
+    const bool r1_button = msg->buttons[static_cast<int>(Buttons::RB)];
     const bool l1_pressed = upedge_l1(l1_button);
     const bool r1_pressed = upedge_r1(r1_button);
-    const bool l2_pressed = upedge_l2(l2_button);
     const bool l1_released = downedge_l1(l1_button);
     const bool r1_released = downedge_r1(r1_button);
-    const bool l2_released = downedge_l2(l2_button);
 
-    if(l1_pressed || l2_pressed){
+    if(l1_pressed){
         publish_nav_cmd("left");
     }
     if(r1_pressed){
         publish_nav_cmd("right");
     }
-    if((l1_released || r1_released || l2_released) && !l1_button && !r1_button && !l2_button){
+    if((l1_released || r1_released) && !l1_button && !r1_button){
         publish_nav_cmd("straight");
     }
     // レーン切り替え
-    if(upedge_cross(msg->buttons[static_cast<int>(Buttons::Cross)])){
+    if(upedge_b(msg->buttons[static_cast<int>(Buttons::B)])){
         publisher_lane_switch_flag->publish(std::make_unique<std_msgs::msg::Empty>());
         RCLCPP_INFO(this->get_logger(), "レーン切り替え");
     }
