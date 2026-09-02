@@ -57,8 +57,9 @@ def generate_launch_description():
         launch_discription.add_action(odrive_launch)
     if(launch_params['socketcan'] is True):
         launch_discription.add_action(socketcan_node)
+    if(launch_params['joy'] is True):
+        launch_discription.add_action(joy_node)
 
-    launch_discription.add_action(joy_node)
     launch_discription.add_action(chassis_driver_node)
 
     return launch_discription
