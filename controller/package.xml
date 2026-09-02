@@ -7,7 +7,7 @@
   <maintainer email="s24s1037hw@s.chibakoudai.jp">KazumaFujino</maintainer>
   <license>TODO: License declaration</license>
 
-  <buildtool_depend>ament_cmake_ros</buildtool_depend>
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
 
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
