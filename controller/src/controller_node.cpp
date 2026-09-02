@@ -27,14 +27,14 @@ steering_max_angle(dtor(get_parameter("steering_max.pos").as_double()))
 
 void Controller::_subscriber_callback_joy(const sensor_msgs::msg::Joy::ConstSharedPtr msg){
     // 自動か手動か
-    if(upedge_menu(msg->buttons[static_cast<int>(Buttons::Menu)])){
+    if(upedge_menu(msg->buttons[static_cast<int>(Buttons::View)])){
         auto msg_autonomous = std::make_unique<std_msgs::msg::Bool>();
         msg_autonomous->data = is_autonomous = !is_autonomous;
         publisher_autonomous->publish(std::move(msg_autonomous));
         RCLCPP_INFO(this->get_logger(), "自動フラグ : %d", is_autonomous);
     }
     // リスタート
-    if(upedge_view(msg->buttons[static_cast<int>(Buttons::View)])){
+    if(upedge_view(msg->buttons[static_cast<int>(Buttons::Menu)])){
         publisher_restart->publish(std::make_unique<std_msgs::msg::Empty>());
         RCLCPP_INFO(this->get_logger(), "再稼働");
     }
