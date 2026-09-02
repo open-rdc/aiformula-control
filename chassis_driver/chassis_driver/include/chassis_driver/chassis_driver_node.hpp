@@ -100,8 +100,8 @@ private:
     uint8_t odrive_axis_state = 0;
     double odrive_pos_prev = 0.0;
     int odrive_pos_stable_count = 0;
-    double home_offset_turns = 0.0;
-    bool home_offset_valid = false;
+    double origin_offset_turns = 0.0;
+    bool origin_offset_valid = false;
 
     // 動作モード
     enum class Mode{
