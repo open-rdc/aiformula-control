@@ -70,6 +70,7 @@ private:
     const double rotate_ratio;
     const bool is_reverse_left;
     const bool is_reverse_right;
+    const bool use_velocity_body;
     const int caster_max_count;
     const double caster_gear_ratio;
     const double caster_wheel_radius;

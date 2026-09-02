@@ -28,6 +28,7 @@ chassis_driver_node:
     reduction_ratio : 1.0
     reverse_left_flag : false
     reverse_right_flag : false
+    use_velocity_body : true
     caster:
       max_count : 16384
       gear_ratio : 0.59090909090909
