@@ -68,6 +68,16 @@ drive_pid(get_parameter("interval_ms").as_int())
         _qos,
         std::bind(&ChassisDriver::_subscriber_callback_bodyvel, this, std::placeholders::_1)
     );
+    _subscription_odrive_heartbeat = this->create_subscription<socketcan_interface_msg::msg::SocketcanIF>(
+        "can_rx_301",
+        _qos,
+        std::bind(&ChassisDriver::_subscriber_callback_odrive_heartbeat, this, std::placeholders::_1)
+    );
+    _subscription_odrive_estimate = this->create_subscription<socketcan_interface_msg::msg::SocketcanIF>(
+        "can_rx_309",
+        _qos,
+        std::bind(&ChassisDriver::_subscriber_callback_odrive_estimate, this, std::placeholders::_1)
+    );
     publisher_can = this->create_publisher<socketcan_interface_msg::msg::SocketcanIF>("can_tx", _qos);
     publisher_odrive = this->create_publisher<odrive_can::msg::ControlMessage>("/odrive_axis0/control_message", _qos);
     publisher_caster_data = this->create_publisher<std_msgs::msg::Float64MultiArray>("caster_data", _qos);
@@ -162,11 +172,11 @@ void ChassisDriver::_publisher_callback(){
     motor_pos = winding_length / reel_radius;
     // RCLCPP_INFO(this->get_logger(), "DEL:%.2f POS:%.2f ENC:%.2f", rtod(delta), rtod(motor_pos), rtod(caster_orientation));
 
-    // ODriveにトルク指令を送信
+    // ODriveに位置指令を送信
     auto msg_odrive_control = std::make_shared<odrive_can::msg::ControlMessage>();
     msg_odrive_control->control_mode = 3;
     msg_odrive_control->input_mode = 1;
-    msg_odrive_control->input_pos = motor_pos;
+    msg_odrive_control->input_pos = motor_pos + home_offset_turns;
     msg_odrive_control->input_vel = 0.0;
     msg_odrive_control->input_torque = 0.0;
     publisher_odrive->publish(*msg_odrive_control);
@@ -184,6 +194,10 @@ void ChassisDriver::_publisher_callback(){
 }
 
 void ChassisDriver::_subscriber_callback_restart(const std_msgs::msg::Empty::SharedPtr msg){
+    if(!home_offset_valid){
+        RCLCPP_WARN(this->get_logger(), "Odriveの基準位置が未設定です");
+        return;
+    }
     mode = Mode::stay;
 
     velplanner::Physics_t physics_zero(0.0, 0.0, 0.0);
@@ -246,6 +260,31 @@ void ChassisDriver::_subscriber_callback_emergency(const socketcan_interface_msg
 void ChassisDriver::_subscriber_callback_bodyvel(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg){
     current_body_vel = msg->twist.twist;
     // RCLCPP_INFO(this->get_logger(), "VEL:%.2f", current_body_vel.linear.x);
+}
+
+void ChassisDriver::_subscriber_callback_odrive_heartbeat(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){
+    if(msg->candlc < 5) return;
+    odrive_axis_state = static_cast<uint8_t>(msg->candata[4]);   // 0x301: byte4 = axis_state (1: IDLE, 8: CLOSED_LOOP_CONTROL)
+}
+
+void ChassisDriver::_subscriber_callback_odrive_estimate(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){
+    if(msg->candlc < 4) return;
+    uint8_t _candata[8];
+    for(int i=0; i<msg->candlc; i++) _candata[i] = msg->candata[i];
+    const double est = bytes_to_float(_candata);   // 0x309: byte0-3 = pos_estimate [turn]
+
+    if(home_offset_valid) return;
+    if(odrive_axis_state != 1) return;
+    // IDLE時のみ以下の処理を実行
+
+    odrive_pos_stable_count = (std::abs(est - odrive_pos_prev) < 0.01) ? odrive_pos_stable_count + 1 : 0;
+    odrive_pos_prev = est;
+    if(odrive_pos_stable_count < 5) return;
+
+    home_offset_turns = std::round(est);
+    home_offset_valid = true;
+    const double inferred = est - home_offset_turns;
+    RCLCPP_INFO(this->get_logger(), "ODrive基準位置を決定: pos_estimate=%.3f offset=%.0f 実位置推定=%.3f", est, home_offset_turns, inferred);
 }
 
 void ChassisDriver::send_rpm(const double linear_vel, const double angular_vel){
