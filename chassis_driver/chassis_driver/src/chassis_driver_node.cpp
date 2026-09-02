@@ -176,7 +176,7 @@ void ChassisDriver::_publisher_callback(){
     auto msg_odrive_control = std::make_shared<odrive_can::msg::ControlMessage>();
     msg_odrive_control->control_mode = 3;
     msg_odrive_control->input_mode = 1;
-    msg_odrive_control->input_pos = motor_pos + home_offset_turns;
+    msg_odrive_control->input_pos = motor_pos + origin_offset_turns;
     msg_odrive_control->input_vel = 0.0;
     msg_odrive_control->input_torque = 0.0;
     publisher_odrive->publish(*msg_odrive_control);
@@ -194,7 +194,7 @@ void ChassisDriver::_publisher_callback(){
 }
 
 void ChassisDriver::_subscriber_callback_restart(const std_msgs::msg::Empty::SharedPtr msg){
-    if(!home_offset_valid){
+    if(!origin_offset_valid){
         RCLCPP_WARN(this->get_logger(), "Odriveの基準位置が未設定です");
         return;
     }
@@ -273,7 +273,7 @@ void ChassisDriver::_subscriber_callback_odrive_estimate(const socketcan_interfa
     for(int i=0; i<msg->candlc; i++) _candata[i] = msg->candata[i];
     const double est = bytes_to_float(_candata);   // 0x309: byte0-3 = pos_estimate [turn]
 
-    if(home_offset_valid) return;
+    if(origin_offset_valid) return;
     if(odrive_axis_state != 1) return;
     // IDLE時のみ以下の処理を実行
 
@@ -281,10 +281,10 @@ void ChassisDriver::_subscriber_callback_odrive_estimate(const socketcan_interfa
     odrive_pos_prev = est;
     if(odrive_pos_stable_count < 5) return;
 
-    home_offset_turns = std::round(est);
-    home_offset_valid = true;
-    const double inferred = est - home_offset_turns;
-    RCLCPP_INFO(this->get_logger(), "ODrive基準位置を決定: pos_estimate=%.3f offset=%.0f 実位置推定=%.3f", est, home_offset_turns, inferred);
+    origin_offset_turns = std::round(est);
+    origin_offset_valid = true;
+    const double inferred = est - origin_offset_turns;
+    RCLCPP_INFO(this->get_logger(), "ODrive基準位置を決定: pos_estimate=%.3f offset=%.0f 実位置推定=%.3f", est, origin_offset_turns, inferred);
 }
 
 void ChassisDriver::send_rpm(const double linear_vel, const double angular_vel){
