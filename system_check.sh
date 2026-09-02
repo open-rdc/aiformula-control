@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 #
-# aiformula 実機システム状態チェック
+# aiformula 足回り制御機 システム状態チェック
 #
-# main_exec.launch.py を起動した状態で実行し、以下をまとめて確認する。
+# chassis_driver.launch.py を起動した状態で実行し、以下をまとめて確認する。
 #
 #   1. ROS 2 実行環境
 #   2. ノードの生存
 #   3. トピックの出版状況と周波数
-#   4. TF
+#   4. ODrive の内部状態 (エラー / 温度 / バス電圧・電流)
 #   5. CAN バス
-#   6. もう一方のマシン (Jetson / DellPC) との接続
+#   6. Jetsonとの接続
 #
-# 実機専用。main_params.yaml の launch.sim が true のときは非対応として終了する。
-#
-# ROLE="dell" のとき (aiformula-control リポジトリで動く DellPC 向け):
-#   - main_executor が無いため main_params.yaml のパラメータ確認をスキップする
-#   - 日本語ロケールが無いためログはすべて英語で出力する
+# このリポジトリ (aiformula-control) は DellPC 上での実行のみを前提とする。
+# 知覚 / 自己位置 / 計画 / TF といった Jetson 側で確認すべき項目は扱わない。
+# DellPC は日本語ロケール非対応のため、出力はすべて英語で行う
+# (このファイル内のコメントは表示されないので日本語のままとする)。
 #
 #   使い方:
 #     ./system_check.sh
@@ -30,32 +29,31 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   このスクリプトを置くマシンに合わせて書き換える。
 # ---------------------------------------------------------------------------
 
-# 実行ロール
-#   "jetson" : 知覚 / 自己位置 / 計画 / TF を確認する
-#   "dell"   : chassis_driver / CAN / ODrive を確認する
-readonly ROLE="dell"
-
 # 各マシンの固定 IP
 readonly JETSON_IP="192.168.10.10"
 readonly DELL_PC_IP="192.168.10.20"
 
+readonly OWN_NAME="DellPC"  OWN_IP="$DELL_PC_IP"
+readonly PEER_NAME="Jetson" PEER_IP="$JETSON_IP"
+
 # 周波数の計測時間 [秒]
 readonly MEASURE_DURATION=10.0
 
-# ロールから自機と相手機を決める
-if [[ "$ROLE" == "dell" ]]; then
-  readonly OWN_NAME="DellPC"  OWN_IP="$DELL_PC_IP"
-  readonly PEER_NAME="Jetson" PEER_IP="$JETSON_IP"
-else
-  readonly OWN_NAME="Jetson"  OWN_IP="$JETSON_IP"
-  readonly PEER_NAME="DellPC" PEER_IP="$DELL_PC_IP"
-fi
+# --- ODrive のしきい値 -----------------------------------------------------
+#   機体の構成 (バッテリ電圧 / モータ / 放熱) に合わせて調整する。
+#   温度は計測期間中の最大値、バス電圧は最小値と最大値で判定する。
+readonly ODRIVE_FET_TEMP_WARN=70.0     # インバータ (FET) 温度 [degC] 警告
+readonly ODRIVE_FET_TEMP_NG=90.0       # インバータ (FET) 温度 [degC] 異常
+readonly ODRIVE_MOTOR_TEMP_WARN=80.0   # モータ温度 [degC] 警告
+readonly ODRIVE_MOTOR_TEMP_NG=100.0    # モータ温度 [degC] 異常
+readonly ODRIVE_BUS_VOLTAGE_MIN=20.0   # バス電圧 [V] 下限 (バッテリ構成に合わせる)
+readonly ODRIVE_BUS_VOLTAGE_MAX=52.0   # バス電圧 [V] 上限 (回生時の跳ね上がり込み)
+readonly ODRIVE_BUS_CURRENT_WARN=20.0  # バス電流 [A] 警告 (絶対値)
 
-# ROLE=dell のログは英語で出す (DellPC は日本語ロケール非対応のため)
-#   t <日本語> <英語> : ロールに応じた文字列を返す
-t() {
-  if [[ "$ROLE" == "dell" ]]; then printf '%s' "$2"; else printf '%s' "$1"; fi
-}
+# odrive_can_launch.yaml が読めなかったときの既定値
+readonly ODRIVE_NODE_ID_DEFAULT=24
+readonly ODRIVE_NS_DEFAULT="odrive_axis0"
+readonly ODRIVE_NODE_NAME_DEFAULT="can_node"
 
 # ---------------------------------------------------------------------------
 # ログ出力
@@ -74,7 +72,7 @@ fi
 
 NAME_WIDTH=48
 
-# 端末上の表示幅を数える (日本語などの全角文字は 2 桁として扱う)
+# 端末上の表示幅を数える (全角文字は 2 桁として扱う)
 disp_width() {
   local s="$1" w=0 c cp i
   for (( i = 0; i < ${#s}; i++ )); do
@@ -102,7 +100,7 @@ section() {
 
 # report <OK|NG|WARN|SKIP> <項目名> [メッセージ]
 #   OK   : 計測値などをその行に併記する
-#   それ以外: 「〇〇に失敗しました。××を確認してください。」を次行にインデントして出す
+#   それ以外: 失敗内容と対処を次行にインデントして出す
 report() {
   local status="$1" name="$2" msg="${3:-}"
   local color label pad len
@@ -127,7 +125,7 @@ report() {
     printf "  %s %s %s%s%s  %s\n" "$name" "$pad" "$color" "$label" "$C_OFF" "$msg"
   else
     printf "  %s %s %s%s%s\n" "$name" "$pad" "$color" "$label" "$C_OFF"
-    [[ -n "$msg" ]] && printf "       %s→ %s%s\n" "$color" "$msg" "$C_OFF"
+    [[ -n "$msg" ]] && printf "       %s-> %s%s\n" "$color" "$msg" "$C_OFF"
   fi
 }
 
@@ -143,141 +141,158 @@ fatal() {
 # ---------------------------------------------------------------------------
 # 0. 実行環境
 # ---------------------------------------------------------------------------
-section "$(t "実行環境" "Environment")"
+section "Environment"
 
 if ! command -v ros2 >/dev/null 2>&1; then
-  report NG "$(t "ros2 コマンド" "ros2 command")" "$(t "ros2 コマンドの検出に失敗しました。/opt/ros/humble/setup.bash と install/setup.bash を source したか確認してください。" "ros2 command not found. Check that /opt/ros/humble/setup.bash and install/setup.bash are sourced.")"
-  fatal "$(t "ROS 2 環境が読み込まれていないため中断します。" "Aborting because the ROS 2 environment is not loaded.")"
+  report NG "ros2 command" "ros2 command not found. Check that /opt/ros/humble/setup.bash and install/setup.bash are sourced."
+  fatal "Aborting because the ROS 2 environment is not loaded."
 fi
-report OK "$(t "ros2 コマンド" "ros2 command")" "$(command -v ros2)"
+report OK "ros2 command" "$(command -v ros2)"
 
 if [[ -z "${ROS_DISTRO:-}" ]]; then
-  report NG "ROS_DISTRO" "$(t "ROS_DISTRO の取得に失敗しました。/opt/ros/humble/setup.bash を source したか確認してください。" "ROS_DISTRO is not set. Check that /opt/ros/humble/setup.bash is sourced.")"
+  report NG "ROS_DISTRO" "ROS_DISTRO is not set. Check that /opt/ros/humble/setup.bash is sourced."
 else
   report OK "ROS_DISTRO" "$ROS_DISTRO"
 fi
 
-report OK "ROS_DOMAIN_ID" "$(t "${ROS_DOMAIN_ID:-0 (未設定)} ※Jetson と DellPC で一致させること" "${ROS_DOMAIN_ID:-0 (unset)} (must match between Jetson and DellPC)")"
-report OK "RMW_IMPLEMENTATION" "$(t "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp (既定)} ※2 台で一致させること" "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp (default)} (must match on both machines)")"
-if [[ "$ROLE" == "dell" ]]; then
-  report OK "role" "dell (chassis control PC, aiformula-control)"
-else
-  report OK "実行ロール" "jetson (高レイヤ制御機)"
-fi
+report OK "ROS_DOMAIN_ID" "${ROS_DOMAIN_ID:-0 (unset)} (must match between DellPC and Jetson)"
+report OK "RMW_IMPLEMENTATION" "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp (default)} (must match on both machines)"
+report OK "role" "DellPC (chassis control PC, aiformula-control)"
 
-# パラメータ既定値 (dell はパラメータ確認をしないため既定値をそのまま使う)
-#   CAN_IF は aiformula-control の chassis_driver_params.yaml (if_name: "can_main") に合わせる
-SIM="false"; JOY="false"; CAN_IF="can_main"
+# ---------------------------------------------------------------------------
+# パラメータ (chassis_driver_params.yaml / odrive_can_launch.yaml)
+#   install 側を優先して探す (--symlink-install なら src と同一実体)。
+# ---------------------------------------------------------------------------
+CAN_IF="can_main"
+ODRIVE_NODE_ID="$ODRIVE_NODE_ID_DEFAULT"
+ODRIVE_NS="$ODRIVE_NS_DEFAULT"
+ODRIVE_NODE_NAME="$ODRIVE_NODE_NAME_DEFAULT"
 
-if [[ "$ROLE" == "dell" ]]; then
-  # aiformula-control リポジトリには main_executor が無いため、パラメータ確認は行わない
-  report SKIP "main_params.yaml" "Parameter check is skipped on the DellPC (the aiformula-control repository has no main_executor)."
-else
-  # main_params.yaml を探す (install 側を優先。--symlink-install なら src と同一実体)
-  #   2 台分離後に実行機パッケージが main_executor 以外になっても拾えるよう、
-  #   install / src 配下の総当たりまで含めて探す。マッチしないグロブは -f で弾かれる
-  PARAMS_YAML=""
-  for candidate in \
-    "${SCRIPT_DIR}/../install/main_executor/share/main_executor/config/main_params.yaml" \
-    "${SCRIPT_DIR}/main_executor/config/main_params.yaml" \
-    "${SCRIPT_DIR}"/../install/*/share/*/config/main_params.yaml \
-    "${SCRIPT_DIR}"/*/config/main_params.yaml
-  do
+find_first() {
+  local candidate
+  for candidate in "$@"; do
     if [[ -f "$candidate" ]]; then
-      PARAMS_YAML="$(realpath "$candidate" 2>/dev/null || echo "$candidate")"
-      break
+      realpath "$candidate" 2>/dev/null || printf '%s' "$candidate"
+      return 0
     fi
   done
+  return 1
+}
 
-  if [[ -z "$PARAMS_YAML" ]]; then
-    report NG "main_params.yaml" "main_params.yaml の読み込みに失敗しました。src/main_executor/config/main_params.yaml が存在するか確認してください。"
-    fatal "パラメータファイルが見つからないため中断します。"
-  fi
-  report OK "main_params.yaml" "$PARAMS_YAML"
+CHASSIS_YAML="$(find_first \
+  "${SCRIPT_DIR}/../install/chassis_driver/share/chassis_driver/config/chassis_driver_params.yaml" \
+  "${SCRIPT_DIR}/chassis_driver/chassis_driver/config/chassis_driver_params.yaml")" || CHASSIS_YAML=""
 
-  # launch セクションと CAN インターフェース名を取り出す
-  PARAM_DUMP="$(python3 - "$PARAMS_YAML" <<'PY'
+ODRIVE_YAML="$(find_first \
+  "${SCRIPT_DIR}/../install/chassis_driver/share/chassis_driver/launch/odrive_can_launch.yaml" \
+  "${SCRIPT_DIR}/chassis_driver/chassis_driver/launch/odrive_can_launch.yaml")" || ODRIVE_YAML=""
+
+if [[ -z "$CHASSIS_YAML" ]]; then
+  report WARN "chassis_driver_params.yaml" "chassis_driver_params.yaml was not found. Falling back to the default CAN interface name (${CAN_IF})."
+else
+  PARAM_DUMP="$(python3 - "$CHASSIS_YAML" "$ODRIVE_YAML" <<'PY' 2>/dev/null
 import sys
 import yaml
 
-with open(sys.argv[1]) as f:
-    doc = yaml.safe_load(f) or {}
 
-launch = (doc.get('launch') or {}).get('ros__parameters', {}) or {}
-can = (doc.get('socketcan_interface_node') or {}).get('ros__parameters', {}) or {}
+def load(path):
+    if not path:
+        return {}
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
 
-print('SIM=%s' % ('true' if launch.get('sim', False) else 'false'))
-print('JOY=%s' % ('true' if launch.get('joy', False) else 'false'))
-print('CAN_IF=%s' % (can.get('if_name', 'can_main')))
+
+chassis = load(sys.argv[1])
+can = (chassis.get('socketcan_interface_node') or {}).get('ros__parameters', {}) or {}
+print('CAN_IF=%s' % can.get('if_name', 'can_main'))
+
+# odrive_can_launch.yaml から namespace / ノード名 / node_id を取り出す。
+# CAN ID (base = node_id << 5) の算出に使うため、実際の起動設定から読む。
+odrive = load(sys.argv[2] if len(sys.argv) > 2 else '')
+for entry in (odrive.get('launch') or []):
+    node = entry.get('node') if isinstance(entry, dict) else None
+    if not node or node.get('exec') != 'odrive_can_node':
+        continue
+    print('ODRIVE_NS=%s' % node.get('namespace', 'odrive_axis0'))
+    print('ODRIVE_NODE_NAME=%s' % node.get('name', 'can_node'))
+    for p in (node.get('param') or []):
+        if isinstance(p, dict) and p.get('name') == 'node_id':
+            print('ODRIVE_NODE_ID=%d' % int(p.get('value', 24)))
+    break
 PY
 )"
 
-  if [[ $? -ne 0 || -z "$PARAM_DUMP" ]]; then
-    report NG "main_params.yaml の解析" "main_params.yaml の解析に失敗しました。YAML の書式と python3-yaml の導入を確認してください。"
-    fatal "パラメータを解釈できないため中断します。"
+  if [[ -z "$PARAM_DUMP" ]]; then
+    report WARN "chassis_driver_params.yaml" "Failed to parse ${CHASSIS_YAML}. Check the YAML syntax and that python3-yaml is installed. Using defaults."
+  else
+    while IFS='=' read -r key value; do
+      case "$key" in
+        CAN_IF)           CAN_IF="$value" ;;
+        ODRIVE_NS)        ODRIVE_NS="$value" ;;
+        ODRIVE_NODE_NAME) ODRIVE_NODE_NAME="$value" ;;
+        ODRIVE_NODE_ID)   ODRIVE_NODE_ID="$value" ;;
+      esac
+    done <<< "$PARAM_DUMP"
+    report OK "chassis_driver_params.yaml" "$CHASSIS_YAML"
   fi
-
-  while IFS='=' read -r key value; do
-    case "$key" in
-      SIM)    SIM="$value" ;;
-      JOY)    JOY="$value" ;;
-      CAN_IF) CAN_IF="$value" ;;
-    esac
-  done <<< "$PARAM_DUMP"
-
-  if [[ "$SIM" == "true" ]]; then
-    report NG "launch.sim" "main_params.yaml の sim が true です。サポートしていません。"
-    info "このスクリプトは実機構成 (sim: false) 専用です。"
-    info "${PARAMS_YAML} の launch: セクションで sim: false に変更してから実行してください。"
-    printf "\n"
-    exit 1
-  fi
-  report OK "launch.sim" "false (実機構成)"
-  report OK "launch.joy" "$JOY"
-  report OK "CAN インターフェース名" "$CAN_IF"
 fi
 
+report OK "CAN interface name" "$CAN_IF"
+
+if [[ -n "$ODRIVE_YAML" ]]; then
+  report OK "odrive_can_launch.yaml" "$ODRIVE_YAML"
+else
+  report WARN "odrive_can_launch.yaml" "odrive_can_launch.yaml was not found. Assuming node_id=${ODRIVE_NODE_ID} and namespace /${ODRIVE_NS}."
+fi
+
+# ODrive の CAN ID は base = node_id << 5 に cmd_id を OR したもの
+ODRIVE_CAN_BASE=$(( ODRIVE_NODE_ID << 5 ))
+odrive_can_id() { printf '%03X' $(( ODRIVE_CAN_BASE | $1 )); }
+
+ID_HEARTBEAT="$(odrive_can_id 0x01)"   # ControllerStatus: エラー / axis_state
+ID_ERROR="$(odrive_can_id 0x03)"       # ODriveStatus: active_errors / disarm_reason
+ID_ENCODER="$(odrive_can_id 0x09)"     # ControllerStatus: pos / vel
+ID_IQ="$(odrive_can_id 0x14)"          # ControllerStatus: Iq
+ID_TEMP="$(odrive_can_id 0x15)"        # ODriveStatus: FET / モータ温度
+ID_BUS_VI="$(odrive_can_id 0x17)"      # ODriveStatus: バス電圧 / 電流
+ID_TORQUE="$(odrive_can_id 0x1C)"      # ControllerStatus: トルク
+
+report OK "ODrive CAN base ID" "node_id ${ODRIVE_NODE_ID} -> 0x${ID_HEARTBEAT} (heartbeat) .. 0x${ID_TORQUE} (torques)"
+
 # ---------------------------------------------------------------------------
-# 1〜4. ノード / トピック / 周波数 / TF (rclpy でまとめて計測)
+# 1〜4. ノード / トピック / 周波数 / ODrive 内部状態 (rclpy でまとめて計測)
 # ---------------------------------------------------------------------------
 run_ros_checks() {
-  python3 - "$MEASURE_DURATION" "$ROLE" "$JOY" <<'PY' 2>/dev/null
+  python3 - "$MEASURE_DURATION" "$ODRIVE_NS" "$ODRIVE_NODE_NAME" "$ODRIVE_NODE_ID" \
+    "$ODRIVE_FET_TEMP_WARN" "$ODRIVE_FET_TEMP_NG" \
+    "$ODRIVE_MOTOR_TEMP_WARN" "$ODRIVE_MOTOR_TEMP_NG" \
+    "$ODRIVE_BUS_VOLTAGE_MIN" "$ODRIVE_BUS_VOLTAGE_MAX" \
+    "$ODRIVE_BUS_CURRENT_WARN" <<'PY' 2>/dev/null
 import sys
 import time
 
 DURATION = float(sys.argv[1])
-ROLE = sys.argv[2]
-JOY_ENABLED = sys.argv[3] == 'true'
+ODRV_NS = '/' + sys.argv[2].strip('/')
+ODRV_NODE = ODRV_NS + '/' + sys.argv[3]
+ODRV_NODE_ID = int(sys.argv[4])
+FET_WARN = float(sys.argv[5])
+FET_NG = float(sys.argv[6])
+MOTOR_WARN = float(sys.argv[7])
+MOTOR_NG = float(sys.argv[8])
+VBUS_MIN = float(sys.argv[9])
+VBUS_MAX = float(sys.argv[10])
+IBUS_WARN = float(sys.argv[11])
 
 DISCOVERY_WAIT = 2.0
-
-JA = ROLE != 'dell'  # dell は日本語ロケール非対応のため英語で出力する
-
-
-def tr(ja, en):
-    return ja if JA else en
-
-
-def hint_text(h):
-    """ヒントは str (単一言語) または {'ja': ..., 'en': ...} の辞書。"""
-    if isinstance(h, dict):
-        return h['ja' if JA else 'en']
-    return h
-
+ODRV_BASE = ODRV_NODE_ID << 5
 
 try:
     import rclpy
     from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
     from rclpy.executors import SingleThreadedExecutor
-    from rclpy.time import Time
-    from rclpy.duration import Duration
     from rosidl_runtime_py.utilities import get_message
-    from tf2_ros import Buffer, TransformListener
 except Exception as exc:  # noqa: BLE001
-    print('RES\tNG\t%s\t%s' % (
-        tr('rclpy のインポート', 'rclpy import'),
-        tr('rclpy の読み込みに失敗しました (%s)。install/setup.bash を source したか確認してください。',
-           'Failed to import rclpy (%s). Check that install/setup.bash is sourced.') % exc))
+    print('RES\tNG\trclpy import\tFailed to import rclpy (%s). Check that install/setup.bash is sourced.' % exc)
     sys.exit(1)
 
 
@@ -285,162 +300,133 @@ def emit(kind, *fields):
     print('\t'.join([kind] + [str(f) for f in fields]), flush=True)
 
 
-# dell は足回り制御のみ担当 (速度指令の入力 → CAN で MD へ送信まで)。
-# 上層ソフトウェアの項目は "This is jetson role" として飛ばす。
-SKIP_REASON = ('This is jetson role'
-               if ROLE == 'dell'
-               else 'DellPC 側の担当です。DellPC 上のスクリプトで ROLE="dell" にして確認してください。')
+def can_topic(cmd_id):
+    """ODrive の cmd_id に対応する socketcan_interface の受信トピック名。"""
+    return '/can_rx_%03X' % (ODRV_BASE | cmd_id)
 
 
-def want(layer):
-    if ROLE == 'dell':
-        return layer in ('low', 'both')
-    return layer in ('high', 'both')
-
-
-# (フルノード名, レイヤ, 深刻度, ヒント)
-#   ヒントの言語: high 層は Jetson (日本語) でしか表示されないため日本語、
-#   low 層は DellPC (英語) でしか表示されないため英語で書く。
-#   both 層は両方で表示されるため {'ja': ..., 'en': ...} の辞書にする。
-NODES = [
-    ('/controller_node',           'high', 'error', 'main_exec が起動しているか、colcon build --packages-up-to main_executor が通っているか確認してください。'),
-    ('/vectormap_server_node',     'high', 'error', 'main_exec のログに map_path の読み込みエラーが出ていないか確認してください。'),
-    ('/lane_line_publisher_node',  'high', 'error', 'main_exec が起動しているか確認してください。'),
-    ('/vectormap_visualizer_node', 'high', 'warn',  'main_exec が起動しているか確認してください。'),
-    ('/pose_estimater_node',       'high', 'error', 'main_exec が起動しているか確認してください。'),
-    ('/ekf_localizer_node',        'high', 'error', 'main_exec が起動しているか確認してください。'),
-    ('/odom_tf_node',              'high', 'error', 'main_exec が起動しているか確認してください。'),
-    ('/map_odom_tf_node',          'high', 'error', 'main_exec が起動しているか確認してください。'),
-    ('/mission_planner_node',      'high', 'error', 'main_exec が起動しているか確認してください。'),
-    ('/local_planner_server_node', 'high', 'error', 'main_exec が起動しているか確認してください。'),
-    ('/controller_server_node',    'high', 'error', 'main_exec が起動しているか確認してください。'),
-    ('/zed_wrapper_node',          'high', 'error', 'ZED SDK が導入されているか (未検出だと zed_wrapper はビルドをスキップします)、ZED カメラが USB3 で接続されているか確認してください。'),
-    ('/road_detector_node',        'high', 'error', 'road_detector (rclpy) が起動しているか、colcon build --packages-select road_detector が通っているか確認してください。'),
-    ('/vectornav',                 'high', 'error', 'vectornav が起動しているか、VN-100 が /dev/ttyUSB0 に見えて読み書き権限があるか確認してください。'),
-    ('/vn_sensor_msgs',            'high', 'error', 'vectornav の launch が読み込まれているか確認してください。'),
-    ('/robot_state_publisher',     'high', 'error', 'robot_state_publisher が起動しているか、URDF (simulator/models/ai_car1/model.urdf) が読めているか確認してください。'),
-    ('/chassis_driver_node',       'low',  'error', 'Check that the executor including chassis_driver is running on the DellPC.'),
-    ('/socketcan_interface_node',  'low',  'error', 'Check that socketcan_interface_node is running and that binding to the CAN interface did not fail (see the startup log).'),
-    ('/odrive_axis0/can_node',     'low',  'error', 'Check that odrive_can_launch.yaml is loaded on the DellPC.'),
+# ---------------------------------------------------------------------------
+# ODrive のエラー定義 (odrive_base/include/odrive_enums.h と一致させること)
+# ---------------------------------------------------------------------------
+ODRIVE_ERRORS = [
+    (0x00000001, 'INITIALIZING', 'The ODrive is still booting. Wait a moment and check again.'),
+    (0x00000002, 'SYSTEM_LEVEL', 'Internal firmware error. Power-cycle the ODrive and check the firmware version.'),
+    (0x00000004, 'TIMING_ERROR', 'The control loop missed its deadline. Check the firmware version and the CAN/encoder load.'),
+    (0x00000008, 'MISSING_ESTIMATE', 'No position/velocity estimate. Check the encoder wiring and that calibration completed.'),
+    (0x00000010, 'BAD_CONFIG', 'Invalid configuration. Review the ODrive config and run save_configuration().'),
+    (0x00000020, 'DRV_FAULT', 'Gate driver fault. Check the motor phase wiring for shorts and the power supply.'),
+    (0x00000040, 'MISSING_INPUT', 'No control input arrived within the watchdog window. Check that %s/control_message is published at 500 Hz.' % ODRV_NS),
+    (0x00000100, 'DC_BUS_OVER_VOLTAGE', 'Bus over-voltage, usually regenerative braking. Check the brake resistor and dc_max_negative_current.'),
+    (0x00000200, 'DC_BUS_UNDER_VOLTAGE', 'Bus under-voltage. Check the battery charge, the main switch, and the power wiring.'),
+    (0x00000400, 'DC_BUS_OVER_CURRENT', 'Bus over-current. Check the current limit and the mechanical load.'),
+    (0x00000800, 'DC_BUS_OVER_REGEN_CURRENT', 'Regenerative current exceeded the limit. Check the brake resistor rating.'),
+    (0x00001000, 'CURRENT_LIMIT_VIOLATION', 'Measured current exceeded the limit. Check current_soft_max / current_hard_max and the motor load.'),
+    (0x00002000, 'MOTOR_OVER_TEMP', 'Motor over-temperature. Stop driving and let it cool down; check motor_thermistor settings.'),
+    (0x00004000, 'INVERTER_OVER_TEMP', 'Inverter (FET) over-temperature. Stop driving, improve cooling, and lower the current limit.'),
+    (0x00008000, 'VELOCITY_LIMIT_VIOLATION', 'Velocity exceeded the limit. Check vel_limit and the gear ratio.'),
+    (0x00010000, 'POSITION_LIMIT_VIOLATION', 'Position exceeded the limit. Check the position limit settings.'),
+    (0x01000000, 'WATCHDOG_TIMER_EXPIRED', 'The axis watchdog expired. Check that control commands keep arriving over CAN.'),
+    (0x02000000, 'ESTOP_REQUESTED', 'An emergency stop was requested over CAN. Release the E-stop and clear the errors.'),
+    (0x04000000, 'SPINOUT_DETECTED', 'Spinout detected (encoder and motor disagree). Check the encoder mounting and the phase wiring.'),
+    (0x08000000, 'BRAKE_RESISTOR_DISARMED', 'The brake resistor is disarmed. Check brake_resistance and the resistor wiring.'),
+    (0x10000000, 'THERMISTOR_DISCONNECTED', 'The motor thermistor is disconnected. Check the thermistor wiring or disable it in the config.'),
+    (0x40000000, 'CALIBRATION_ERROR', 'Calibration failed. Re-run the calibration sequence and check the procedure result.'),
 ]
 
-if JOY_ENABLED:
-    NODES.insert(0, ('/joy_node', 'high', 'error',
-                     'joy パッケージが導入されているか、コントローラが /dev/input/js0 に接続されているか確認してください。'))
+AXIS_STATES = {
+    0: 'UNDEFINED', 1: 'IDLE', 2: 'STARTUP_SEQUENCE', 3: 'FULL_CALIBRATION_SEQUENCE',
+    4: 'MOTOR_CALIBRATION', 6: 'ENCODER_INDEX_SEARCH', 7: 'ENCODER_OFFSET_CALIBRATION',
+    8: 'CLOSED_LOOP_CONTROL', 9: 'LOCKIN_SPIN', 10: 'ENCODER_DIR_FIND', 11: 'HOMING',
+    12: 'ENCODER_HALL_POLARITY_CALIBRATION', 13: 'ENCODER_HALL_PHASE_CALIBRATION',
+    14: 'ANTICOGGING_CALIBRATION',
+}
 
-# (トピック, 型, 種別, 期待Hz, 下限Hz, 上限Hz, レイヤ, 深刻度, ヒント)
+PROCEDURE_RESULTS = {
+    0: 'SUCCESS', 1: 'BUSY', 2: 'CANCELLED', 3: 'DISARMED', 4: 'NO_RESPONSE',
+    5: 'POLE_PAIR_CPR_MISMATCH', 6: 'PHASE_RESISTANCE_OUT_OF_RANGE',
+    7: 'PHASE_INDUCTANCE_OUT_OF_RANGE', 8: 'UNBALANCED_PHASES', 9: 'INVALID_MOTOR_TYPE',
+    10: 'ILLEGAL_HALL_STATE', 11: 'TIMEOUT', 12: 'HOMING_WITHOUT_ENDSTOP',
+    13: 'INVALID_STATE', 14: 'NOT_CALIBRATED', 15: 'NOT_CONVERGING',
+}
+
+
+def decode_errors(value):
+    """エラービットフィールドを (名前一覧, 対処一覧) に展開する。"""
+    names, hints = [], []
+    known = 0
+    for bit, name, hint in ODRIVE_ERRORS:
+        if value & bit:
+            names.append('%s (0x%08X)' % (name, bit))
+            hints.append(hint)
+            known |= bit
+    rest = value & ~known
+    if rest:
+        names.append('UNKNOWN (0x%08X)' % rest)
+    return names, hints
+
+
+# (フルノード名, 深刻度, ヒント)
+NODES = [
+    ('/chassis_driver_node', 'error',
+     'Check that chassis_driver.launch.py is running on the DellPC.'),
+    ('/socketcan_interface_node', 'error',
+     'Check that socketcan_interface_node is running and that binding to the CAN interface did not fail (see the startup log).'),
+    (ODRV_NODE, 'error',
+     'Check that odrive_can_launch.yaml is included (launch.odrive must be true in chassis_driver_params.yaml).'),
+]
+
+# (トピック, 型, 種別, 期待Hz, 下限Hz, 上限Hz, 深刻度, ヒント)
 #   種別 rate   : 周波数まで判定する
 #   種別 event  : 到着したことだけを判定する (発生契機が不定のもの)
 #   種別 latched: transient_local。1 サンプル受け取れれば良い
+CAN_MSG = 'socketcan_interface_msg/msg/SocketcanIF'
+
 TOPICS = [
-    # --- センサ ---
-    ('/vectornav/imu', 'sensor_msgs/msg/Imu', 'rate', 20.0, 14.0, None, 'high', 'error',
-     'IMU データの受信に失敗しました。vectornav が起動しているか、vectornav.yaml の AsyncDataOutputFrequency (20 Hz) と /dev/ttyUSB0 の接続を確認してください。'),
-    ('/vectornav/gnss', 'sensor_msgs/msg/NavSatFix', 'rate', 20.0, 14.0, None, 'high', 'error',
-     'GNSS データの受信に失敗しました。vectornav が起動しているか、GNSS アンテナが接続され屋外で測位できているか確認してください。'),
-    # 2 台構成では Jetson が出版し DellPC の chassis_driver も購読する
-    ('/vectornav/velocity_body', 'geometry_msgs/msg/TwistWithCovarianceStamped', 'rate', 20.0, 14.0, None, 'both', 'error',
-     {'ja': '車体速度の受信に失敗しました。vectornav の INS グループ出力が有効か、vn_sensor_msgs が起動しているか確認してください。2 台構成では Jetson 側で出版されるため、DellPC で見えない場合は 2 台間の DDS 疎通を確認してください。',
-      'en': 'Failed to receive body velocity. This topic is published by the Jetson; check that vectornav and vn_sensor_msgs are running there, and check the DDS connectivity between the two machines.'}),
-    ('/joy', 'sensor_msgs/msg/Joy', 'event', None, None, None, 'high', 'error',
-     'コントローラ入力の受信に失敗しました。joy_node が起動しているか、コントローラが /dev/input/js0 として認識されているか確認してください。'),
+    # --- Jetson から届く指令 (DellPC が購読する側なので確認対象) ---
+    ('/cmd_vel', 'steered_drive_msg/msg/SteeredDrive', 'rate', 20.0, 14.0, None, 'error',
+     'Failed to receive velocity commands. This topic is published by the Jetson; check that controller_server_node is running there and check the DDS connectivity between the two machines.'),
+    ('/vectornav/velocity_body', 'geometry_msgs/msg/TwistWithCovarianceStamped', 'rate', 20.0, 14.0, None, 'error',
+     'Failed to receive body velocity. This topic is published by the Jetson; check that vectornav and vn_sensor_msgs are running there, and check the DDS connectivity between the two machines.'),
+    ('/restart', 'std_msgs/msg/Empty', 'event', None, None, None, 'warn',
+     'Failed to receive the restart command. It is not published until restart is sent from the gamepad, so this is normal before driving. If it never arrives, check the DDS connectivity between the two machines.'),
 
-    # --- カメラ ---
-    ('/zed/zed_node/rgb/image_rect_color', 'sensor_msgs/msg/Image', 'rate', 15.0, 10.0, None, 'high', 'error',
-     'カメラ画像の受信に失敗しました。ZED SDK が導入され zed_wrapper が ENABLE_ZED 付きでビルドされているか、カメラが USB3 ポートに接続されているか確認してください。'),
-    ('/zed/zed_node/point_cloud', 'sensor_msgs/msg/PointCloud2', 'rate', 15.0, 10.0, None, 'high', 'warn',
-     '点群の受信に失敗しました。zed_wrapper_node の depth mode 設定と GPU メモリの空きを確認してください。'),
-
-    # --- 知覚 ---
-    ('/perception/lane_mask', 'sensor_msgs/msg/Image', 'rate', 15.0, 8.0, None, 'high', 'error',
-     '白線マスクの受信に失敗しました。road_detector_node が起動しているか、入力 /zed/zed_node/rgb/image_rect_color が出ているか、GPU 推論でエラーが出ていないか確認してください。'),
-    ('/perception/lane_mask_visualize', 'sensor_msgs/msg/Image', 'rate', 15.0, 8.0, None, 'high', 'warn',
-     '白線マスク可視化の受信に失敗しました。road_detector_node のログを確認してください。'),
-    ('/perception/lane_line_points', 'sensor_msgs/msg/PointCloud2', 'rate', 15.0, 8.0, None, 'high', 'error',
-     '白線点群の受信に失敗しました。lane_line_publisher_node が /perception/lane_mask を受け取れているか、mask_threshold (既定 128) が高すぎないか確認してください。'),
-    ('/perception/lane_line', 'visualization_msgs/msg/MarkerArray', 'rate', 15.0, 8.0, None, 'high', 'warn',
-     '白線マーカの受信に失敗しました。lane_line_publisher_node のログを確認してください。'),
-    ('/perception/vectormap_visualize', 'sensor_msgs/msg/Image', 'rate', 15.0, 8.0, None, 'high', 'warn',
-     'ベクターマップ重畳画像の受信に失敗しました。vectormap_visualizer_node が TF base_link->map を引けているか確認してください。'),
-    ('/perception/objects', 'object_detection_msgs/msg/ObjectInfoArray', 'event', None, None, None, 'high', 'warn',
-     '障害物情報の受信に失敗しました。object_detector_node は main_executor/src/main.cpp でコメントアウトされています。障害物回避を使う場合は有効化してください。'),
-
-    # --- 地図 ---
-    ('/vector_map', 'vectormap_msgs/msg/VectorMap', 'latched', None, None, None, 'high', 'error',
-     'ベクターマップの受信に失敗しました。vectormap_server_node が起動しているか、main_params.yaml の map_path (aiformula_course.osm) が map パッケージに存在するか確認してください。'),
-    ('/vector_map/visualize', 'visualization_msgs/msg/MarkerArray', 'latched', None, None, None, 'high', 'warn',
-     'ベクターマップ可視化の受信に失敗しました。vectormap_server_node のログを確認してください。'),
-
-    # --- 自己位置 ---
-    ('/localization/pf_pose', 'geometry_msgs/msg/PoseWithCovarianceStamped', 'rate', 50.0, 35.0, None, 'high', 'error',
-     'パーティクルフィルタ推定値の受信に失敗しました。pose_estimater_node が /vector_map と /perception/lane_line_points を受け取れているか確認してください。'),
-    ('/localization/particle', 'geometry_msgs/msg/PoseArray', 'rate', 50.0, 35.0, None, 'high', 'warn',
-     'パーティクル分布の受信に失敗しました。pose_estimater_node のログを確認してください。'),
-    ('/localization/pose', 'geometry_msgs/msg/PoseWithCovarianceStamped', 'rate', 50.0, 35.0, None, 'high', 'error',
-     'EKF 推定姿勢の受信に失敗しました。ekf_localizer_node が /localization/pf_pose と /vectornav/velocity_body を受け取れているか確認してください。'),
-    ('/localization/odom', 'nav_msgs/msg/Odometry', 'rate', 50.0, 35.0, None, 'high', 'error',
-     'オドメトリの受信に失敗しました。odom_tf_node が /vectornav/imu と /vectornav/velocity_body を受け取れているか確認してください。'),
-
-    # --- 計画 ---
-    ('/planner/global_path', 'nav_msgs/msg/Path', 'rate', 10.0, 7.0, None, 'high', 'error',
-     'グローバル経路の受信に失敗しました。mission_planner_node が /vector_map と /localization/pose を受け取れているか、自車が経路上のレーンレット近傍にいるか確認してください。'),
-    ('/planner/local_path', 'nav_msgs/msg/Path', 'rate', 10.0, 7.0, None, 'high', 'error',
-     'ローカル経路の受信に失敗しました。local_planner_server_node が /planner/global_path を受け取れているか、local_planner_plugin の名前が正しいか確認してください。'),
-
-    # --- 制御 ---
-    ('/cmd_vel', 'steered_drive_msg/msg/SteeredDrive', 'rate', 20.0, 14.0, None, 'both', 'error',
-     {'ja': '速度指令の受信に失敗しました。controller_server_node が起動しているか、controller_plugin の名前が正しいか確認してください。',
-      'en': 'Failed to receive velocity commands. This topic is published by the Jetson; check that controller_server_node is running there and check the DDS connectivity between the two machines.'}),
-    ('/autonomous', 'std_msgs/msg/Bool', 'event', None, None, None, 'high', 'warn',
-     '自律走行フラグの受信に失敗しました。コントローラの Share ボタンで自律走行に切り替えたか確認してください。'),
-    ('/planning/nav_cmd', 'std_msgs/msg/String', 'event', None, None, None, 'high', 'warn',
-     '進路指令の受信に失敗しました。controller_node がコントローラ入力を受け取れているか確認してください。'),
-    # 2 台構成では Jetson の controller_node が出版し DellPC の chassis_driver が購読する
-    ('/restart', 'std_msgs/msg/Empty', 'event', None, None, None, 'both', 'warn',
-     {'ja': '再起動指令の受信に失敗しました。コントローラで再起動を送るまでは出版されないため、走行前であれば正常です。DellPC 側で見えない場合は 2 台間の DDS 疎通を確認してください。',
-      'en': 'Failed to receive the restart command. It is not published until restart is sent from the gamepad, so this is normal before driving. If it never arrives, check the DDS connectivity between the two machines.'}),
-    # 2 台構成では DellPC が出版し Jetson の controller_server が購読する
-    ('/caster_data', 'std_msgs/msg/Float64MultiArray', 'rate', 500.0, 250.0, None, 'both', 'warn',
-     {'ja': 'キャスタ状態の受信に失敗しました。chassis_driver_node は停止モード中は出版しません。コントローラで再起動 (restart) を送り、/cmd_vel が届いているか確認してください。Jetson 側で見えない場合は 2 台間の DDS 疎通も確認してください。',
-      'en': 'Failed to receive caster states. chassis_driver_node does not publish while in stop mode. Send restart from the gamepad and check that /cmd_vel is arriving.'}),
-    ('/caster_odom', 'nav_msgs/msg/Odometry', 'rate', 500.0, 250.0, None, 'low', 'warn',
+    # --- DellPC が出版する足回りの状態 ---
+    ('/caster_data', 'std_msgs/msg/Float64MultiArray', 'rate', 500.0, 250.0, None, 'warn',
+     'Failed to receive caster states. chassis_driver_node does not publish while in stop mode. Send restart from the gamepad and check that /cmd_vel is arriving.'),
+    ('/caster_odom', 'nav_msgs/msg/Odometry', 'rate', 500.0, 250.0, None, 'warn',
      'Failed to receive caster odometry. chassis_driver_node does not publish it until the caster rotation encoder (/can_rx_013) is received at least once. Check the CAN wiring. Note: nothing currently subscribes to this topic.'),
 
     # --- CAN トピック ---
-    ('/can_tx', 'socketcan_interface_msg/msg/SocketcanIF', 'rate', 500.0, 250.0, None, 'low', 'error',
+    ('/can_tx', CAN_MSG, 'rate', 500.0, 250.0, None, 'error',
      'Failed to receive CAN TX frames. Check that chassis_driver_node is running (interval_ms: 2 = 500 Hz) and check the executor log.'),
-    ('/can_rx_012', 'socketcan_interface_msg/msg/SocketcanIF', 'event', None, None, None, 'low', 'error',
+    ('/can_rx_012', CAN_MSG, 'event', None, None, None, 'error',
      'Failed to receive the caster steering angle encoder (CAN ID 0x012). socketcan_interface_node only creates topics for IDs it has received. Check the encoder board power, CAN wiring, and termination resistors.'),
-    ('/can_rx_013', 'socketcan_interface_msg/msg/SocketcanIF', 'event', None, None, None, 'low', 'error',
+    ('/can_rx_013', CAN_MSG, 'event', None, None, None, 'error',
      'Failed to receive the caster rotation encoder (CAN ID 0x013). Check the encoder board power, CAN wiring, and termination resistors.'),
-    ('/can_rx_712', 'socketcan_interface_msg/msg/SocketcanIF', 'event', None, None, None, 'low', 'warn',
+    ('/can_rx_712', CAN_MSG, 'event', None, None, None, 'warn',
      'Failed to receive the emergency stop board (CAN ID 0x712). Check the board power and CAN wiring.'),
-    ('/can_rx_301', 'socketcan_interface_msg/msg/SocketcanIF', 'event', None, None, None, 'low', 'error',
-     'Failed to receive the ODrive heartbeat (CAN ID 0x301 = node_id 24). Check the ODrive power, node_id setting (24), and that the CAN bitrate matches.'),
-    ('/can_rx_309', 'socketcan_interface_msg/msg/SocketcanIF', 'event', None, None, None, 'low', 'warn',
-     'Failed to receive ODrive encoder estimates (CAN ID 0x309). Check the ODrive cyclic message settings (encoder_estimates rate).'),
-    ('/odrive_axis0/control_message', 'odrive_can/msg/ControlMessage', 'rate', 500.0, 250.0, None, 'low', 'warn',
-     'Failed to receive ODrive control commands. chassis_driver_node does not publish while in stop mode. Check that restart was sent from the gamepad.'),
-    ('/odrive_axis0/controller_status', 'odrive_can/msg/ControllerStatus', 'event', None, None, None, 'low', 'warn',
-     'Failed to receive ODrive controller status. Check that /can_rx_301 and /can_rx_309 are arriving.'),
-    ('/odrive_axis0/odrive_status', 'odrive_can/msg/ODriveStatus', 'event', None, None, None, 'low', 'warn',
-     'Failed to receive ODrive status. Check that /can_rx_303 (errors) and /can_rx_317 (bus voltage) are arriving.'),
-]
 
-# (親, 子, 静的か, 許容遅延[s], ヒント)
-TF_PAIRS = [
-    ('map', 'odom', False, 0.5,
-     'map->odom の取得に失敗しました。map_odom_tf_node が /localization/pose を受け取れているか、odom->base_link が先に出ているか確認してください。'),
-    ('odom', 'base_link', False, 0.2,
-     'odom->base_link の取得に失敗しました。odom_tf_node が /vectornav/imu と /vectornav/velocity_body を受け取れているか確認してください。'),
-    ('map', 'base_link', False, 0.5,
-     'map->base_link の取得に失敗しました。map->odom と odom->base_link のどちらかが欠けています。上 2 項目の結果を確認してください。'),
-    ('base_link', 'camera_link', True, None,
-     'base_link->camera_link (静的 TF) の取得に失敗しました。robot_state_publisher が起動しているか、URDF に camera_joint があるか確認してください。'),
-    ('base_link', 'imu_link', True, None,
-     'base_link->imu_link (静的 TF) の取得に失敗しました。robot_state_publisher が起動しているか確認してください。'),
-    ('base_link', 'gps_link', True, None,
-     'base_link->gps_link (静的 TF) の取得に失敗しました。robot_state_publisher が起動しているか確認してください。'),
+    # --- ODrive の周期メッセージ ---
+    #   odrive_can_node は 7 種のうち必要なものが全て揃うまで status を出版しない
+    #   (ODriveStatus: error/temperature/bus_vi, ControllerStatus: heartbeat/encoder/iq/torque)
+    #   ため、どれが欠けているかを個別に見えるようにする。
+    (can_topic(0x01), CAN_MSG, 'event', None, None, None, 'error',
+     'Failed to receive the ODrive heartbeat. Check the ODrive power, the node_id setting (%d), and that the CAN bitrate matches.' % ODRV_NODE_ID),
+    (can_topic(0x03), CAN_MSG, 'event', None, None, None, 'error',
+     'Failed to receive the ODrive error message. ODriveStatus (errors / temperature / bus voltage) is never published without it. Set axis0.config.can.error_msg_rate_ms to a non-zero value (e.g. 100) with odrivetool and run save_configuration().'),
+    (can_topic(0x09), CAN_MSG, 'event', None, None, None, 'warn',
+     'Failed to receive ODrive encoder estimates. Set axis0.config.can.encoder_msg_rate_ms to a non-zero value; ControllerStatus is not published without it.'),
+    (can_topic(0x14), CAN_MSG, 'event', None, None, None, 'warn',
+     'Failed to receive the ODrive Iq message. Set axis0.config.can.iq_msg_rate_ms to a non-zero value; ControllerStatus is not published without it.'),
+    (can_topic(0x15), CAN_MSG, 'event', None, None, None, 'error',
+     'Failed to receive the ODrive temperature message, so FET / motor temperature cannot be monitored. Set axis0.config.can.temperature_msg_rate_ms to a non-zero value (e.g. 100) and run save_configuration().'),
+    (can_topic(0x17), CAN_MSG, 'event', None, None, None, 'error',
+     'Failed to receive the ODrive bus voltage/current message. Set axis0.config.can.bus_vi_msg_rate_ms to a non-zero value (e.g. 100) and run save_configuration().'),
+    (can_topic(0x1C), CAN_MSG, 'event', None, None, None, 'warn',
+     'Failed to receive the ODrive torque message. Set axis0.config.can.torque_msg_rate_ms to a non-zero value; ControllerStatus is not published without it.'),
+
+    ('%s/control_message' % ODRV_NS, 'odrive_can/msg/ControlMessage', 'rate', 500.0, 250.0, None, 'warn',
+     'Failed to receive ODrive control commands. chassis_driver_node does not publish while in stop mode. Check that restart was sent from the gamepad.'),
 ]
 
 REL_NAME = {ReliabilityPolicy.RELIABLE: 'reliable', ReliabilityPolicy.BEST_EFFORT: 'best_effort'}
@@ -450,9 +436,6 @@ rclpy.init(args=None)
 node = rclpy.create_node('aiformula_system_check')
 executor = SingleThreadedExecutor()
 executor.add_node(node)
-
-tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
-tf_listener = TransformListener(tf_buffer, node, spin_thread=False)
 
 
 def spin_for(seconds):
@@ -465,38 +448,31 @@ def spin_for(seconds):
 spin_for(DISCOVERY_WAIT)
 
 # =========================== 1. ノード =====================================
-emit('SEC', tr('ノード', 'Nodes'))
+emit('SEC', 'Nodes')
 
 live_nodes = set()
 for name, namespace in node.get_node_names_and_namespaces():
     ns = namespace if namespace.endswith('/') else namespace + '/'
     live_nodes.add(ns + name)
 
-for full_name, layer, severity, hint in NODES:
-    if not want(layer):
-        emit('RES', 'SKIP', full_name, SKIP_REASON)
-        continue
+for full_name, severity, hint in NODES:
     if full_name in live_nodes:
-        emit('RES', 'OK', full_name, tr('起動中', 'running'))
+        emit('RES', 'OK', full_name, 'running')
     else:
         emit('RES', 'NG' if severity == 'error' else 'WARN', full_name,
-             tr('%s の検出に失敗しました。%s', 'Node %s was not found. %s') % (full_name, hint_text(hint)))
+             'Node %s was not found. %s' % (full_name, hint))
 
 # =========================== 2. トピック ===================================
-emit('SEC', tr('トピック / 周波数 (計測 %.1f 秒)', 'Topics / rates (measuring %.1f s)') % DURATION)
+emit('SEC', 'Topics / rates (measuring %.1f s)' % DURATION)
 
 graph_types = dict(node.get_topic_names_and_types())
 
-targets = []   # (spec, 状態)
+targets = []   # (spec, 状態, 付加情報)
 subs = []
 stats = {}     # topic -> [count, first_t, last_t]
 
 for spec in TOPICS:
-    topic, expected_type, kind, expect_hz, min_hz, max_hz, layer, severity, hint = spec
-
-    if not want(layer):
-        targets.append((spec, 'skip', SKIP_REASON))
-        continue
+    topic, expected_type, kind, expect_hz, min_hz, max_hz, severity, hint = spec
 
     if topic not in graph_types:
         targets.append((spec, 'absent', None))
@@ -551,40 +527,104 @@ for spec in TOPICS:
         for p in pub_infos:
             if (p.qos_profile.reliability == ReliabilityPolicy.BEST_EFFORT
                     and s.qos_profile.reliability == ReliabilityPolicy.RELIABLE):
-                mismatch.append(tr('%s の reliability が reliable (出版側は best_effort)',
-                                   'reliability of %s is reliable (publisher is best_effort)') % s.node_name)
+                mismatch.append('reliability of %s is reliable (publisher is best_effort)' % s.node_name)
             if (p.qos_profile.durability == DurabilityPolicy.VOLATILE
                     and s.qos_profile.durability == DurabilityPolicy.TRANSIENT_LOCAL):
-                mismatch.append(tr('%s の durability が transient_local (出版側は volatile)',
-                                   'durability of %s is transient_local (publisher is volatile)') % s.node_name)
+                mismatch.append('durability of %s is transient_local (publisher is volatile)' % s.node_name)
 
     targets.append((spec, 'measuring', sorted(set(mismatch))))
+
+# ------------------------------------------------------------------
+# ODrive の内部状態は同じ計測窓で拾う (温度・電圧は最大/最小、エラーは論理和)
+# ------------------------------------------------------------------
+ODRV_STATUS_TOPIC = '%s/odrive_status' % ODRV_NS
+CTRL_STATUS_TOPIC = '%s/controller_status' % ODRV_NS
+
+odrv = {
+    'odrive_count': 0, 'ctrl_count': 0,
+    'fet_max': None, 'motor_max': None,
+    'vbus_min': None, 'vbus_max': None,
+    'ibus_min': None, 'ibus_max': None,
+    'errors': 0, 'disarm': 0, 'axis_errors': 0,
+    'axis_state': None, 'procedure_result': None,
+    'odrive_missing': None, 'ctrl_missing': None,
+}
+
+
+def _minmax(key_min, key_max, value):
+    if odrv[key_min] is None or value < odrv[key_min]:
+        odrv[key_min] = value
+    if odrv[key_max] is None or value > odrv[key_max]:
+        odrv[key_max] = value
+
+
+def odrive_status_cb(msg):
+    odrv['odrive_count'] += 1
+    if odrv['fet_max'] is None or msg.fet_temperature > odrv['fet_max']:
+        odrv['fet_max'] = msg.fet_temperature
+    if odrv['motor_max'] is None or msg.motor_temperature > odrv['motor_max']:
+        odrv['motor_max'] = msg.motor_temperature
+    _minmax('vbus_min', 'vbus_max', msg.bus_voltage)
+    _minmax('ibus_min', 'ibus_max', msg.bus_current)
+    odrv['errors'] |= msg.active_errors
+    odrv['disarm'] |= msg.disarm_reason
+
+
+def controller_status_cb(msg):
+    odrv['ctrl_count'] += 1
+    odrv['axis_errors'] |= msg.active_errors
+    odrv['axis_state'] = msg.axis_state
+    odrv['procedure_result'] = msg.procedure_result
+
+
+def subscribe_status(topic, type_name, callback, key):
+    """状態トピックを購読する。購読できない理由は key に控えて後で報告する。"""
+    if topic not in graph_types:
+        odrv[key] = 'the topic does not exist'
+        return
+    if type_name not in graph_types[topic]:
+        odrv[key] = 'the type is %s, not %s' % ('/'.join(graph_types[topic]), type_name)
+        return
+    if not node.get_publishers_info_by_topic(topic):
+        odrv[key] = 'the topic has no publisher'
+        return
+    try:
+        msg_cls = get_message(type_name)
+    except Exception as exc:  # noqa: BLE001
+        odrv[key] = 'failed to load %s (%s)' % (type_name, exc)
+        return
+    qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=50,
+                     reliability=ReliabilityPolicy.BEST_EFFORT,
+                     durability=DurabilityPolicy.VOLATILE)
+    subs.append(node.create_subscription(msg_cls, topic, callback, qos))
+
+
+subscribe_status(ODRV_STATUS_TOPIC, 'odrive_can/msg/ODriveStatus',
+                 odrive_status_cb, 'odrive_missing')
+subscribe_status(CTRL_STATUS_TOPIC, 'odrive_can/msg/ControllerStatus',
+                 controller_status_cb, 'ctrl_missing')
 
 # --- 計測 ---
 spin_for(DURATION)
 
 for spec, state, extra in targets:
-    topic, expected_type, kind, expect_hz, min_hz, max_hz, layer, severity, hint = spec
+    topic, expected_type, kind, expect_hz, min_hz, max_hz, severity, hint = spec
     ng = 'NG' if severity == 'error' else 'WARN'
 
-    if state == 'skip':
-        emit('RES', 'SKIP', topic, extra)
-        continue
     if state == 'absent':
-        emit('RES', ng, topic, tr('トピック %s が存在しません。%s',
-                                  'Topic %s does not exist. %s') % (topic, hint_text(hint)))
+        emit('RES', ng, topic, 'Topic %s does not exist. %s' % (topic, hint))
         continue
     if state == 'type':
-        emit('RES', ng, topic, tr('型が期待と異なります (期待 %s / 実際 %s)。出版ノードのメッセージ定義を確認してください。',
-                                  'Unexpected message type (expected %s / actual %s). Check the message definition of the publisher.') % (expected_type, extra))
+        emit('RES', ng, topic,
+             'Unexpected message type (expected %s / actual %s). Check the message definition of the publisher.'
+             % (expected_type, extra))
         continue
     if state == 'nopub':
-        emit('RES', ng, topic, tr('%s の出版者が 0 です。出版ノードが起動しているか確認してください。',
-                                  'Topic %s has no publisher. Check that the publishing node is running.') % topic)
+        emit('RES', ng, topic, 'Topic %s has no publisher. Check that the publishing node is running.' % topic)
         continue
     if state == 'notype':
-        emit('RES', ng, topic, tr('メッセージ型 %s の読み込みに失敗しました (%s)。該当 msg パッケージがビルド済みか確認してください。',
-                                  'Failed to load message type %s (%s). Check that the msg package is built.') % (expected_type, extra))
+        emit('RES', ng, topic,
+             'Failed to load message type %s (%s). Check that the msg package is built.' % (expected_type, extra))
         continue
 
     count, first_t, last_t = stats[topic]
@@ -595,74 +635,169 @@ for spec, state, extra in targets:
     pub_n = node.count_publishers(topic)
 
     if count == 0:
-        emit('RES', ng, topic,
-             tr('%s のデータ受信に失敗しました (出版者 %d)。%s',
-                'No data received on %s (publishers: %d). %s') % (topic, pub_n, hint_text(hint)))
+        emit('RES', ng, topic, 'No data received on %s (publishers: %d). %s' % (topic, pub_n, hint))
         continue
 
     if kind == 'latched':
-        emit('RES', 'OK', topic, tr('ラッチ受信 %d 件 (transient_local, pub=%d)',
-                                    'latched: %d sample(s) (transient_local, pub=%d)') % (count, pub_n))
+        emit('RES', 'OK', topic, 'latched: %d sample(s) (transient_local, pub=%d)' % (count, pub_n))
     elif kind == 'event':
-        emit('RES', 'OK', topic, tr('%d 件受信 / %.1f Hz (pub=%d)',
-                                    '%d msg(s) received / %.1f Hz (pub=%d)') % (count, hz, pub_n))
+        emit('RES', 'OK', topic, '%d msg(s) received / %.1f Hz (pub=%d)' % (count, hz, pub_n))
     else:
         lo = min_hz if min_hz is not None else expect_hz * 0.7
         hi = max_hz
         if hz < lo:
             emit('RES', ng, topic,
-                 tr('周波数が不足しています (実測 %.1f Hz / 期待 %.1f Hz / 下限 %.1f Hz)。%s',
-                    'Rate too low (measured %.1f Hz / expected %.1f Hz / minimum %.1f Hz). %s') % (hz, expect_hz, lo, hint_text(hint)))
+                 'Rate too low (measured %.1f Hz / expected %.1f Hz / minimum %.1f Hz). %s'
+                 % (hz, expect_hz, lo, hint))
         elif hi is not None and hz > hi:
             emit('RES', 'WARN', topic,
-                 tr('周波数が過大です (実測 %.1f Hz / 期待 %.1f Hz / 上限 %.1f Hz)。出版者が二重に起動していないか確認してください。',
-                    'Rate too high (measured %.1f Hz / expected %.1f Hz / maximum %.1f Hz). Check that the publisher is not running twice.') % (hz, expect_hz, hi))
+                 'Rate too high (measured %.1f Hz / expected %.1f Hz / maximum %.1f Hz). Check that the publisher is not running twice.'
+                 % (hz, expect_hz, hi))
         else:
-            emit('RES', 'OK', topic, tr('%.1f Hz (期待 %.1f Hz, pub=%d)',
-                                        '%.1f Hz (expected %.1f Hz, pub=%d)') % (hz, expect_hz, pub_n))
+            emit('RES', 'OK', topic, '%.1f Hz (expected %.1f Hz, pub=%d)' % (hz, expect_hz, pub_n))
 
     if extra:
         for m in extra:
             emit('RES', 'WARN', topic + ' (QoS)',
-                 tr('QoS が不整合です: %s。出版側と購読側の QoS 設定を合わせてください。',
-                    'QoS mismatch: %s. Align the QoS settings of publisher and subscriber.') % m)
+                 'QoS mismatch: %s. Align the QoS settings of publisher and subscriber.' % m)
 
-# =========================== 3. TF =========================================
-emit('SEC', 'TF')
+# =========================== 3. ODrive =====================================
+emit('SEC', 'ODrive (node_id %d, %s)' % (ODRV_NODE_ID, ODRV_NS))
 
-if ROLE == 'dell':
-    for parent, child, is_static, max_delay, hint in TF_PAIRS:
-        emit('RES', 'SKIP', '%s -> %s' % (parent, child), SKIP_REASON)
+CLEAR_HINT = ('After removing the cause, clear the errors with '
+              '`ros2 service call %s/clear_errors std_srvs/srv/Empty {}`.' % ODRV_NS)
+
+# --- ODriveStatus: エラー / 温度 / バス電圧・電流 ---
+if odrv['odrive_count'] == 0:
+    reason = odrv['odrive_missing'] or 'no message arrived within %.0f s' % DURATION
+    emit('RES', 'NG', ODRV_STATUS_TOPIC,
+         'ODrive errors, temperature and bus voltage cannot be checked because %s. '
+         'odrive_can_node publishes ODriveStatus only after ALL of 0x%03X (errors), 0x%03X (temperature) '
+         'and 0x%03X (bus voltage/current) have arrived, so a single disabled cyclic message silences the whole topic. '
+         'Check the three /can_rx_* results above and enable the missing rates with odrivetool.'
+         % (reason, ODRV_BASE | 0x03, ODRV_BASE | 0x15, ODRV_BASE | 0x17))
 else:
-    now = node.get_clock().now()
-    for parent, child, is_static, max_delay, hint in TF_PAIRS:
-        label = '%s -> %s' % (parent, child)
-        try:
-            tf = tf_buffer.lookup_transform(parent, child, Time())
-        except Exception as exc:  # noqa: BLE001
-            emit('RES', 'NG', label, '%s (%s)' % (hint, type(exc).__name__))
-            continue
+    emit('RES', 'OK', ODRV_STATUS_TOPIC, '%d msg(s) in %.0f s' % (odrv['odrive_count'], DURATION))
 
-        t = tf.transform.translation
-        pose = 'x=%.3f y=%.3f z=%.3f' % (t.x, t.y, t.z)
+    # ODrive 本体のエラー (計測期間中に一度でも立ったビットの論理和)
+    names, hints = decode_errors(odrv['errors'])
+    if not names:
+        emit('RES', 'OK', 'ODrive active errors', 'none (0x00000000)')
+    else:
+        emit('RES', 'NG', 'ODrive active errors',
+             'The ODrive reports active errors: %s. %s %s'
+             % (', '.join(names), ' '.join(hints), CLEAR_HINT))
 
-        if is_static or max_delay is None:
-            emit('RES', 'OK', label, '%s (静的 TF)' % pose)
-            continue
+    # disarm_reason は最後に disarm したときの理由なので、過去の履歴でも残る
+    names, hints = decode_errors(odrv['disarm'])
+    if not names:
+        emit('RES', 'OK', 'ODrive disarm reason', 'none (0x00000000)')
+    else:
+        emit('RES', 'WARN', 'ODrive disarm reason',
+             'The ODrive disarmed at least once for: %s. This is the reason of the last disarm, so it can be a past event, '
+             'but the axis will not enter CLOSED_LOOP_CONTROL until it is cleared. %s %s'
+             % (', '.join(names), ' '.join(hints), CLEAR_HINT))
 
-        stamp = Time.from_msg(tf.header.stamp)
-        if stamp.nanoseconds == 0:
-            # /tf_static で配信されていると lookup 時刻が 0 のまま返る
-            emit('RES', 'WARN', label,
-                 '%s はタイムスタンプが 0 です。動的 TF のはずが /tf_static で配信されていないか確認してください。' % label)
-            continue
+    # インバータ (FET) 温度
+    fet = odrv['fet_max']
+    if fet >= FET_NG:
+        emit('RES', 'NG', 'ODrive FET temperature',
+             'The inverter is too hot (max %.1f degC >= %.1f degC). Stop driving and let it cool down, improve the cooling, '
+             'and lower the current limit. INVERTER_OVER_TEMP will disarm the axis.' % (fet, FET_NG))
+    elif fet >= FET_WARN:
+        emit('RES', 'WARN', 'ODrive FET temperature',
+             'The inverter is getting hot (max %.1f degC >= %.1f degC). Watch the temperature during long runs.' % (fet, FET_WARN))
+    else:
+        emit('RES', 'OK', 'ODrive FET temperature',
+             'max %.1f degC (warn %.1f / NG %.1f)' % (fet, FET_WARN, FET_NG))
 
-        delay = (now - stamp).nanoseconds / 1e9
-        if delay > max_delay:
-            emit('RES', 'NG', label,
-                 'TF が古くなっています (遅延 %.2f 秒 / 許容 %.2f 秒)。%s' % (delay, max_delay, hint))
-        else:
-            emit('RES', 'OK', label, '%s (遅延 %.3f 秒)' % (pose, delay))
+    # モータ温度 (サーミスタ未設定だと 0.0 が返る)
+    motor = odrv['motor_max']
+    if motor >= MOTOR_NG:
+        emit('RES', 'NG', 'ODrive motor temperature',
+             'The motor is too hot (max %.1f degC >= %.1f degC). Stop driving and let it cool down. '
+             'MOTOR_OVER_TEMP will disarm the axis.' % (motor, MOTOR_NG))
+    elif motor >= MOTOR_WARN:
+        emit('RES', 'WARN', 'ODrive motor temperature',
+             'The motor is getting hot (max %.1f degC >= %.1f degC). Watch the temperature during long runs.' % (motor, MOTOR_WARN))
+    elif motor <= 0.5:
+        emit('RES', 'WARN', 'ODrive motor temperature',
+             'The reported motor temperature is %.1f degC, which usually means the motor thermistor is not configured. '
+             'Motor over-temperature protection is therefore inactive; enable motor_thermistor in the ODrive config or '
+             'accept that only the FET temperature is monitored.' % motor)
+    else:
+        emit('RES', 'OK', 'ODrive motor temperature',
+             'max %.1f degC (warn %.1f / NG %.1f)' % (motor, MOTOR_WARN, MOTOR_NG))
+
+    # バス電圧 (負荷時の落ち込みを見るため最小値で判定する)
+    vmin, vmax = odrv['vbus_min'], odrv['vbus_max']
+    if vmin < VBUS_MIN:
+        emit('RES', 'NG', 'ODrive bus voltage',
+             'The bus voltage dropped to %.1f V (minimum %.1f V). Check the battery charge, the main switch and the power wiring. '
+             'DC_BUS_UNDER_VOLTAGE will disarm the axis.' % (vmin, VBUS_MIN))
+    elif vmax > VBUS_MAX:
+        emit('RES', 'NG', 'ODrive bus voltage',
+             'The bus voltage rose to %.1f V (maximum %.1f V). This is usually regenerative braking; check the brake resistor '
+             'and dc_max_negative_current. DC_BUS_OVER_VOLTAGE will disarm the axis.' % (vmax, VBUS_MAX))
+    else:
+        emit('RES', 'OK', 'ODrive bus voltage',
+             '%.1f - %.1f V (allowed %.1f - %.1f V)' % (vmin, vmax, VBUS_MIN, VBUS_MAX))
+
+    # バス電流 (負値は回生)
+    imin, imax = odrv['ibus_min'], odrv['ibus_max']
+    ipeak = max(abs(imin), abs(imax))
+    if ipeak > IBUS_WARN:
+        emit('RES', 'WARN', 'ODrive bus current',
+             'The bus current reached %.1f A (threshold %.1f A, range %.1f - %.1f A, negative means regeneration). '
+             'Check the mechanical load and the current limit.' % (ipeak, IBUS_WARN, imin, imax))
+    else:
+        emit('RES', 'OK', 'ODrive bus current',
+             '%.1f - %.1f A (peak %.1f A, threshold %.1f A)' % (imin, imax, ipeak, IBUS_WARN))
+
+# --- ControllerStatus: heartbeat 由来の軸の状態 ---
+if odrv['ctrl_count'] == 0:
+    reason = odrv['ctrl_missing'] or 'no message arrived within %.0f s' % DURATION
+    emit('RES', 'NG', CTRL_STATUS_TOPIC,
+         'The axis state and the heartbeat errors cannot be checked because %s. '
+         'odrive_can_node publishes ControllerStatus only after ALL of 0x%03X (heartbeat), 0x%03X (encoder), '
+         '0x%03X (Iq) and 0x%03X (torques) have arrived. Check the four /can_rx_* results above.'
+         % (reason, ODRV_BASE | 0x01, ODRV_BASE | 0x09, ODRV_BASE | 0x14, ODRV_BASE | 0x1C))
+else:
+    emit('RES', 'OK', CTRL_STATUS_TOPIC, '%d msg(s) in %.0f s' % (odrv['ctrl_count'], DURATION))
+
+    names, hints = decode_errors(odrv['axis_errors'])
+    if not names:
+        emit('RES', 'OK', 'ODrive axis errors (heartbeat)', 'none (0x00000000)')
+    else:
+        emit('RES', 'NG', 'ODrive axis errors (heartbeat)',
+             'The heartbeat reports active errors: %s. %s %s'
+             % (', '.join(names), ' '.join(hints), CLEAR_HINT))
+
+    state = odrv['axis_state']
+    state_name = AXIS_STATES.get(state, 'UNKNOWN')
+    if state == 8:
+        emit('RES', 'OK', 'ODrive axis state', '%s (%d)' % (state_name, state))
+    elif state == 1:
+        emit('RES', 'WARN', 'ODrive axis state',
+             'The axis is IDLE (1). This is normal before restart is sent from the gamepad; chassis_driver_node requests '
+             'CLOSED_LOOP_CONTROL (8) when /restart arrives. If it stays IDLE while driving, the ODrive disarmed - '
+             'check the disarm reason and the errors above.')
+    else:
+        emit('RES', 'WARN', 'ODrive axis state',
+             'The axis is in %s (%d) instead of CLOSED_LOOP_CONTROL (8). Wait for the procedure to finish, then check '
+             'the procedure result below.' % (state_name, state))
+
+    result = odrv['procedure_result']
+    result_name = PROCEDURE_RESULTS.get(result, 'UNKNOWN')
+    if result == 0:
+        emit('RES', 'OK', 'ODrive procedure result', '%s (%d)' % (result_name, result))
+    elif result == 1:
+        emit('RES', 'WARN', 'ODrive procedure result',
+             'A procedure is still running (BUSY). Wait for calibration or the state transition to finish and check again.')
+    else:
+        emit('RES', 'NG', 'ODrive procedure result',
+             'The last procedure ended with %s (%d). The axis will not enter CLOSED_LOOP_CONTROL until this is resolved; '
+             'check the motor and encoder wiring and the calibration settings. %s' % (result_name, result, CLEAR_HINT))
 
 executor.shutdown()
 node.destroy_node()
@@ -683,8 +818,8 @@ dispatch_ros_checks() {
   done < <(run_ros_checks)
 
   if [[ "$produced" -eq 0 ]]; then
-    section "$(t "ノード / トピック / TF" "Nodes / Topics / TF")"
-    report NG "$(t "rclpy チェック" "rclpy check")" "$(t "ROS 2 の状態取得に失敗しました。install/setup.bash を source したか、python3-yaml と tf2_ros が導入されているか確認してください。" "Failed to query the ROS 2 graph. Check that install/setup.bash is sourced and that python3-yaml and tf2_ros are installed.")"
+    section "Nodes / Topics / ODrive"
+    report NG "rclpy check" "Failed to query the ROS 2 graph. Check that install/setup.bash is sourced and that python3-yaml is installed."
   fi
 }
 
@@ -696,12 +831,6 @@ dispatch_ros_checks
 section "CAN (${CAN_IF})"
 
 check_can() {
-  if [[ "$ROLE" == "jetson" ]]; then
-    report SKIP "CAN バス" "DellPC 側の担当です。DellPC 上のスクリプトで ROLE=\"dell\" にして確認してください。"
-    return
-  fi
-
-  # 以降は ROLE=dell でのみ実行されるため、メッセージは英語のみ
   if ! command -v ip >/dev/null 2>&1; then
     report NG "ip command" "ip command not found. Check that iproute2 is installed."
     return
@@ -851,7 +980,7 @@ check_can() {
   count_id() { awk -v id="$1" '$2==id{c++} END{print c+0}' <<< "$dump"; }
 
   # 0x210: chassis_driver -> MD の速度指令 (500 Hz)。速度指令入力から CAN 送信までの
-  # 経路が生きていることを示す、dell の役目の最終出力
+  # 経路が生きていることを示す、DellPC の役目の最終出力
   local n210
   n210="$(count_id 210)"
   if (( n210 == 0 )); then
@@ -875,17 +1004,32 @@ check_can() {
 
   check_id 012 NG   "CAN ID 0x012 (caster steering enc)" "Caster steering angle encoder (0x012) not received. Check the encoder board power, CAN wiring, and termination resistors."
   check_id 013 NG   "CAN ID 0x013 (caster rotation enc)" "Caster rotation encoder (0x013) not received. Check the encoder board power, CAN wiring, and termination resistors."
-  check_id 301 NG   "CAN ID 0x301 (ODrive heartbeat)" "ODrive heartbeat (0x301) not received. Check the ODrive power, node_id setting (24), and bitrate match."
-  check_id 309 WARN "CAN ID 0x309 (ODrive encoder est.)" "ODrive encoder estimates (0x309) not received. Check the ODrive cyclic message settings (encoder_estimates rate)."
   check_id 712 WARN "CAN ID 0x712 (emergency stop)" "Emergency stop board (0x712) not received. Check the board power and CAN wiring."
+
+  # ODrive の周期メッセージ。1 つでも欠けると odrive_can_node が status を出版しないため、
+  # 「どの周期メッセージが無効か」を CAN レベルで切り分けられるようにする。
+  check_id "$ID_HEARTBEAT" NG "CAN ID 0x${ID_HEARTBEAT} (ODrive heartbeat)" \
+    "ODrive heartbeat (0x${ID_HEARTBEAT}) not received. Check the ODrive power, the node_id setting (${ODRIVE_NODE_ID}), and bitrate match."
+  check_id "$ID_ERROR" NG "CAN ID 0x${ID_ERROR} (ODrive errors)" \
+    "ODrive error message (0x${ID_ERROR}) not received, so ODrive errors and disarm reasons cannot be read. Set axis0.config.can.error_msg_rate_ms to a non-zero value (e.g. 100) with odrivetool and run save_configuration()."
+  check_id "$ID_ENCODER" WARN "CAN ID 0x${ID_ENCODER} (ODrive encoder est.)" \
+    "ODrive encoder estimates (0x${ID_ENCODER}) not received. Set axis0.config.can.encoder_msg_rate_ms to a non-zero value."
+  check_id "$ID_IQ" WARN "CAN ID 0x${ID_IQ} (ODrive Iq)" \
+    "ODrive Iq message (0x${ID_IQ}) not received. Set axis0.config.can.iq_msg_rate_ms to a non-zero value."
+  check_id "$ID_TEMP" NG "CAN ID 0x${ID_TEMP} (ODrive temperature)" \
+    "ODrive temperature message (0x${ID_TEMP}) not received, so FET and motor temperature cannot be monitored. Set axis0.config.can.temperature_msg_rate_ms to a non-zero value (e.g. 100) and run save_configuration()."
+  check_id "$ID_BUS_VI" NG "CAN ID 0x${ID_BUS_VI} (ODrive bus V/I)" \
+    "ODrive bus voltage/current message (0x${ID_BUS_VI}) not received. Set axis0.config.can.bus_vi_msg_rate_ms to a non-zero value (e.g. 100) and run save_configuration()."
+  check_id "$ID_TORQUE" WARN "CAN ID 0x${ID_TORQUE} (ODrive torques)" \
+    "ODrive torque message (0x${ID_TORQUE}) not received. Set axis0.config.can.torque_msg_rate_ms to a non-zero value."
 }
 
 check_can
 
 # ---------------------------------------------------------------------------
-# 6. DellPC (足回り制御機) との接続
+# 6. Jetson (上位機) との接続
 # ---------------------------------------------------------------------------
-section "$(t "${PEER_NAME} 接続 (${PEER_IP})" "${PEER_NAME} connection (${PEER_IP})")"
+section "${PEER_NAME} connection (${PEER_IP})"
 
 check_network() {
   local subnet="${PEER_IP%.*}."
@@ -893,45 +1037,45 @@ check_network() {
   local_addrs="$(ip -4 -brief addr show 2>/dev/null | awk '{for(i=3;i<=NF;i++) print $1" "$i}')"
 
   if grep -qF " ${OWN_IP}/" <<< "$local_addrs"; then
-    report OK "$(t "自機の IP" "own IP")" "${OWN_IP} (${OWN_NAME})"
+    report OK "own IP" "${OWN_IP} (${OWN_NAME})"
   else
     local own_addr
     own_addr="$(grep -F " ${subnet}" <<< "$local_addrs" | head -n1)"
-    report NG "$(t "自機の IP" "own IP")" "$(t "自機に ${OWN_IP} が設定されていません (現在: ${own_addr:-${subnet}0/24 に該当なし})。${OWN_NAME} の固定 IP が ${OWN_IP}/24 になっているか、ROLE の設定が実機と合っているか確認してください。" "This machine does not have ${OWN_IP} (current: ${own_addr:-no address in ${subnet}0/24}). Check that the static IP of the ${OWN_NAME} is ${OWN_IP}/24 and that ROLE matches the actual machine.")"
+    report NG "own IP" "This machine does not have ${OWN_IP} (current: ${own_addr:-no address in ${subnet}0/24}). Check that the static IP of the ${OWN_NAME} is ${OWN_IP}/24."
   fi
 
   if ping -c 3 -W 1 "$PEER_IP" >/dev/null 2>&1; then
     local rtt
     rtt="$(ping -c 3 -W 1 "$PEER_IP" 2>/dev/null | tail -n1 | awk -F'/' '{print $5}')"
-    report OK "ping ${PEER_IP}" "$(t "${PEER_NAME} まで 平均 RTT ${rtt:-?} ms" "avg RTT ${rtt:-?} ms to ${PEER_NAME}")"
+    report OK "ping ${PEER_IP}" "avg RTT ${rtt:-?} ms to ${PEER_NAME}"
   else
-    report NG "ping ${PEER_IP}" "$(t "${PEER_NAME} (${PEER_IP}) への疎通に失敗しました。LAN ケーブルの接続、${PEER_NAME} の電源、固定 IP 設定 (${PEER_IP}/24) を確認してください。" "Failed to reach the ${PEER_NAME} (${PEER_IP}). Check the LAN cable, the power of the ${PEER_NAME}, and its static IP (${PEER_IP}/24).")"
-    info "$(t "自機と ${PEER_NAME} が同一サブネット (${subnet}0/24) にいるかも確認してください。" "Also check that both machines are in the same subnet (${subnet}0/24).")"
+    report NG "ping ${PEER_IP}" "Failed to reach the ${PEER_NAME} (${PEER_IP}). Check the LAN cable, the power of the ${PEER_NAME}, and its static IP (${PEER_IP}/24)."
+    info "Also check that both machines are in the same subnet (${subnet}0/24)."
     return
   fi
 
   local neigh
   neigh="$(ip neigh show "$PEER_IP" 2>/dev/null | head -n1)"
   if [[ -n "$neigh" ]]; then
-    report OK "$(t "ARP エントリ" "ARP entry")" "$neigh"
+    report OK "ARP entry" "$neigh"
   else
-    report WARN "$(t "ARP エントリ" "ARP entry")" "$(t "ARP エントリの取得に失敗しました。L2 の到達性が不安定な可能性があります。" "Failed to get the ARP entry. L2 reachability may be unstable.")"
+    report WARN "ARP entry" "Failed to get the ARP entry. L2 reachability may be unstable."
   fi
 
   if timeout 2 bash -c "echo > /dev/tcp/${PEER_IP}/22" 2>/dev/null; then
-    report OK "SSH (22/tcp)" "$(t "接続可" "reachable")"
+    report OK "SSH (22/tcp)" "reachable"
   else
-    report WARN "SSH (22/tcp)" "$(t "${PEER_NAME} の SSH ポートへの接続に失敗しました。遠隔でログを見る場合は sshd の起動とファイアウォールを確認してください。" "Failed to connect to the SSH port of the ${PEER_NAME}. If you need remote log access, check that sshd is running and check the firewall.")"
+    report WARN "SSH (22/tcp)" "Failed to connect to the SSH port of the ${PEER_NAME}. If you need remote log access, check that sshd is running and check the firewall."
   fi
 
   # マルチキャストが通らないと DDS のディスカバリが成立しない
   if ping -c 2 -W 1 224.0.0.1 2>/dev/null | grep -q "$PEER_IP"; then
-    report OK "$(t "マルチキャスト" "multicast")" "$(t "${PEER_NAME} から応答あり (DDS ディスカバリ可)" "response from the ${PEER_NAME} (DDS discovery possible)")"
+    report OK "multicast" "response from the ${PEER_NAME} (DDS discovery possible)"
   else
-    report WARN "$(t "マルチキャスト" "multicast")" "$(t "マルチキャスト (224.0.0.1) への ${PEER_NAME} からの応答確認に失敗しました。ROS 2 のディスカバリはマルチキャストを使うため、スイッチの IGMP スヌーピングとファイアウォールを確認してください。" "No multicast (224.0.0.1) response from the ${PEER_NAME}. ROS 2 discovery relies on multicast; check IGMP snooping on the switch and the firewall.")"
+    report WARN "multicast" "No multicast (224.0.0.1) response from the ${PEER_NAME}. ROS 2 discovery relies on multicast; check IGMP snooping on the switch and the firewall."
   fi
 
-  report OK "$(t "ROS_DOMAIN_ID の整合" "ROS_DOMAIN_ID consistency")" "$(t "自機は ${ROS_DOMAIN_ID:-0}。${PEER_NAME} 側でも同じ値になっているか確認してください。" "This machine uses ${ROS_DOMAIN_ID:-0}. Check that the ${PEER_NAME} uses the same value.")"
+  report OK "ROS_DOMAIN_ID consistency" "This machine uses ${ROS_DOMAIN_ID:-0}. Check that the ${PEER_NAME} uses the same value."
 }
 
 check_network
@@ -941,38 +1085,21 @@ check_network
 # ---------------------------------------------------------------------------
 TOTAL=$((OK_COUNT + NG_COUNT + WARN_COUNT + SKIP_COUNT))
 
-printf "\n%s===== %s =====%s\n" "$C_SEC" "$(t "結果" "Summary")" "$C_OFF"
-if [[ "$ROLE" == "dell" ]]; then
-  printf "  Total %d checks : %sOK %d%s / %sNG %d%s / %sWARN %d%s / %sSKIP %d%s\n\n" \
-    "$TOTAL" \
-    "$C_OK" "$OK_COUNT" "$C_OFF" \
-    "$C_NG" "$NG_COUNT" "$C_OFF" \
-    "$C_WARN" "$WARN_COUNT" "$C_OFF" \
-    "$C_SKIP" "$SKIP_COUNT" "$C_OFF"
-else
-  printf "  合計 %d 項目 : %sOK %d%s / %sNG %d%s / %sWARN %d%s / %sSKIP %d%s\n\n" \
-    "$TOTAL" \
-    "$C_OK" "$OK_COUNT" "$C_OFF" \
-    "$C_NG" "$NG_COUNT" "$C_OFF" \
-    "$C_WARN" "$WARN_COUNT" "$C_OFF" \
-    "$C_SKIP" "$SKIP_COUNT" "$C_OFF"
-fi
+printf "\n%s===== Summary =====%s\n" "$C_SEC" "$C_OFF"
+printf "  Total %d checks : %sOK %d%s / %sNG %d%s / %sWARN %d%s / %sSKIP %d%s\n\n" \
+  "$TOTAL" \
+  "$C_OK" "$OK_COUNT" "$C_OFF" \
+  "$C_NG" "$NG_COUNT" "$C_OFF" \
+  "$C_WARN" "$WARN_COUNT" "$C_OFF" \
+  "$C_SKIP" "$SKIP_COUNT" "$C_OFF"
 
 if (( NG_COUNT > 0 )); then
-  if [[ "$ROLE" == "dell" ]]; then
-    printf "  %sThere are %d NG items. See the → hints above.%s\n\n" "$C_NG" "$NG_COUNT" "$C_OFF"
-  else
-    printf "  %sNG が %d 件あります。上の → の指示を確認してください。%s\n\n" "$C_NG" "$NG_COUNT" "$C_OFF"
-  fi
+  printf "  %sThere are %d NG items. See the -> hints above.%s\n\n" "$C_NG" "$NG_COUNT" "$C_OFF"
   exit 1
 fi
 
 if (( WARN_COUNT > 0 )); then
-  if [[ "$ROLE" == "dell" ]]; then
-    printf "  %sNo fatal NG. Depending on the situation, the %d WARN item(s) may be normal.%s\n\n" "$C_WARN" "$WARN_COUNT" "$C_OFF"
-  else
-    printf "  %s致命的な NG はありません。WARN %d 件は運用状況によっては正常です。%s\n\n" "$C_WARN" "$WARN_COUNT" "$C_OFF"
-  fi
+  printf "  %sNo fatal NG. Depending on the situation, the %d WARN item(s) may be normal.%s\n\n" "$C_WARN" "$WARN_COUNT" "$C_OFF"
 fi
 
 exit 0
