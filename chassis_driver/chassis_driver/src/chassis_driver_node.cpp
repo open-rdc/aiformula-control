@@ -21,6 +21,7 @@ wheelbase(get_parameter("wheelbase").as_double()),
 rotate_ratio(1.0 / get_parameter("reduction_ratio").as_double()),
 is_reverse_left(get_parameter("reverse_left_flag").as_bool()),
 is_reverse_right(get_parameter("reverse_right_flag").as_bool()),
+use_velocity_body(get_parameter("use_velocity_body").as_bool()),
 caster_max_count(get_parameter("caster.max_count").as_int()),
 caster_orientation_offset(dtor(get_parameter("caster.orientation_offset").as_double())),
 caster_gear_ratio(get_parameter("caster.gear_ratio").as_double()),
@@ -159,7 +160,9 @@ void ChassisDriver::_publisher_callback(){
         delta = cmd_steering;
         driving_flag = true;
     }
-    const double body_vel_squared = current_body_vel.linear.x * current_body_vel.linear.x;
+    // use_velocity_bodyの使い分け
+    const double body_vel = use_velocity_body ? current_body_vel.linear.x : linear_vel;
+    const double body_vel_squared = body_vel * body_vel;
 
     // モータ制御
     double motor_pos = 0.0;
@@ -261,8 +264,10 @@ void ChassisDriver::_subscriber_callback_emergency(const socketcan_interface_msg
     }
 }
 void ChassisDriver::_subscriber_callback_bodyvel(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg){
-    current_body_vel = msg->twist.twist;
-    // RCLCPP_INFO(this->get_logger(), "VEL:%.2f", current_body_vel.linear.x);
+    if (use_velocity_body) {
+        current_body_vel = msg->twist.twist;
+        // RCLCPP_INFO(this->get_logger(), "VEL:%.2f", current_body_vel.linear.x);
+    }
 }
 
 void ChassisDriver::_subscriber_callback_odrive_heartbeat(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){

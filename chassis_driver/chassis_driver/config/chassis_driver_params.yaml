@@ -28,6 +28,7 @@ chassis_driver_node:
     reduction_ratio : 1.0
     reverse_left_flag : false
     reverse_right_flag : false
+    use_velocity_body : true
     caster:
       max_count : 16384
       # 直進姿勢での従動輪エンコーダの読み値[deg]（この値を引いて0degにする）
