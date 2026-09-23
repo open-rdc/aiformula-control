@@ -32,6 +32,8 @@ private:
     rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_caster_rotation;
     rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_emergency;
     rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr _subscription_bodyvel;
+    rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_odrive_heartbeat;
+    rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_odrive_estimate;
     rclcpp::TimerBase::SharedPtr _pub_timer;
 
     void _subscriber_callback_vel(const steered_drive_msg::msg::SteeredDrive::SharedPtr msg);
@@ -40,6 +42,8 @@ private:
     void _subscriber_callback_caster_rotation(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
     void _subscriber_callback_emergency(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
     void _subscriber_callback_bodyvel(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg);
+    void _subscriber_callback_odrive_heartbeat(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
+    void _subscriber_callback_odrive_estimate(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
     void _publisher_callback();
     void send_rpm(const double linear_vel, const double angular_vel);
     static double normalize_angle(double angle);
@@ -92,6 +96,12 @@ private:
     double odom_x = 0.0;
     double odom_y = 0.0;
     double odom_yaw = 0.0;
+    // ODrive用変数
+    uint8_t odrive_axis_state = 0;
+    double odrive_pos_prev = 0.0;
+    int odrive_pos_stable_count = 0;
+    double origin_offset_turns = 0.0;
+    bool origin_offset_valid = false;
 
     // 動作モード
     enum class Mode{
