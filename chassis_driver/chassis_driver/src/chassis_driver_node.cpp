@@ -22,6 +22,7 @@ rotate_ratio(1.0 / get_parameter("reduction_ratio").as_double()),
 is_reverse_left(get_parameter("reverse_left_flag").as_bool()),
 is_reverse_right(get_parameter("reverse_right_flag").as_bool()),
 caster_max_count(get_parameter("caster.max_count").as_int()),
+caster_orientation_offset(dtor(get_parameter("caster.orientation_offset").as_double())),
 caster_gear_ratio(get_parameter("caster.gear_ratio").as_double()),
 caster_wheel_radius(this->get_parameter("caster.wheel_radius").as_double()),
 reel_radius(this->get_parameter("caster.reel_radius").as_double()),
@@ -95,8 +96,8 @@ drive_pid(get_parameter("interval_ms").as_int())
     linear_planner.limit(linear_limit);
     drive_pid.gain(get_parameter("drive_pid.p_gain").as_double(), get_parameter("drive_pid.i_gain").as_double(), get_parameter("drive_pid.d_gain").as_double());
 
-    RCLCPP_INFO(this->get_logger(), "Chassis Driver Node has been started. max vel: %.2f m/s, steering angle: %.1f deg",
-        linear_limit.vel, rtod(steering_limit.pos));
+    RCLCPP_INFO(this->get_logger(), "Chassis Driver Node has been started. max vel: %.2f m/s, steering angle: %.1f deg, caster offset: %.2f deg",
+        linear_limit.vel, rtod(steering_limit.pos), rtod(caster_orientation_offset));
 }
 
 void ChassisDriver::_subscriber_callback_vel(const steered_drive_msg::msg::SteeredDrive::SharedPtr msg){
@@ -224,7 +225,9 @@ void ChassisDriver::_subscriber_callback_caster_orientation(const socketcan_inte
     for(int i=0; i<msg->candlc; i++) _candata[i] = msg->candata[i];
 
     const int count = static_cast<int>(bytes_to_int16(_candata));
-    caster_orientation = count / static_cast<double>(caster_max_count) * 2.0 * d_pi;
+    // 取付原点のオフセットを引いて，直進姿勢を0radにする
+    const double raw_orientation = count / static_cast<double>(caster_max_count) * 2.0 * d_pi;
+    caster_orientation = normalize_angle(raw_orientation - caster_orientation_offset);
     // RCLCPP_INFO(this->get_logger(), "CAS_ORI:%f CNT:%d", rtod(caster_orientation), count);
 }
 void ChassisDriver::_subscriber_callback_caster_rotation(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){
