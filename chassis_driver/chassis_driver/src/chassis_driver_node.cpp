@@ -195,8 +195,6 @@ void ChassisDriver::_publisher_callback(){
 
 void ChassisDriver::_subscriber_callback_restart(const std_msgs::msg::Empty::SharedPtr msg){
     mode = Mode::stay;
-    origin_offset_valid = false;
-
     velplanner::Physics_t physics_zero(0.0, 0.0, 0.0);
     linear_planner.current(physics_zero);
 
