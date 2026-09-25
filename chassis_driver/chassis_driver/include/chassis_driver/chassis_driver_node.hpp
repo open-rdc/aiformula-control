@@ -98,8 +98,6 @@ private:
     double odom_yaw = 0.0;
     // ODrive用変数
     uint8_t odrive_axis_state = 0;
-    double odrive_pos_prev = 0.0;
-    int odrive_pos_stable_count = 0;
     double origin_offset_turns = 0.0;
     bool origin_offset_valid = false;
 

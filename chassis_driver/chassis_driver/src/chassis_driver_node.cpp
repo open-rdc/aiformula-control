@@ -179,7 +179,7 @@ void ChassisDriver::_publisher_callback(){
     msg_odrive_control->input_pos = motor_pos + origin_offset_turns;
     msg_odrive_control->input_vel = 0.0;
     msg_odrive_control->input_torque = 0.0;
-    publisher_odrive->publish(*msg_odrive_control);
+    if(origin_offset_valid) publisher_odrive->publish(*msg_odrive_control);
 
     // （テスト用）従動輪{目標舵角，実測舵角，回転位置｝を出版
     std_msgs::msg::Float64MultiArray caster_data_msg;
@@ -194,11 +194,8 @@ void ChassisDriver::_publisher_callback(){
 }
 
 void ChassisDriver::_subscriber_callback_restart(const std_msgs::msg::Empty::SharedPtr msg){
-    if(!origin_offset_valid){
-        RCLCPP_WARN(this->get_logger(), "Odriveの基準位置が未設定です");
-        return;
-    }
     mode = Mode::stay;
+    origin_offset_valid = false;
 
     velplanner::Physics_t physics_zero(0.0, 0.0, 0.0);
     linear_planner.current(physics_zero);
@@ -269,22 +266,15 @@ void ChassisDriver::_subscriber_callback_odrive_heartbeat(const socketcan_interf
 
 void ChassisDriver::_subscriber_callback_odrive_estimate(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){
     if(msg->candlc < 4) return;
+    if(origin_offset_valid) return;
+    if(odrive_axis_state != 8) return;
+    // CLOSED_LOOP_CONTROL移行後のみ pos_estimate が実位置を示す
     uint8_t _candata[8];
     for(int i=0; i<msg->candlc; i++) _candata[i] = msg->candata[i];
-    const double est = bytes_to_float(_candata);   // 0x309: byte0-3 = pos_estimate [turn]
 
-    if(origin_offset_valid) return;
-    if(odrive_axis_state != 1) return;
-    // IDLE時のみ以下の処理を実行
-
-    odrive_pos_stable_count = (std::abs(est - odrive_pos_prev) < 0.01) ? odrive_pos_stable_count + 1 : 0;
-    odrive_pos_prev = est;
-    if(odrive_pos_stable_count < 5) return;
-
-    origin_offset_turns = std::round(est);
+    origin_offset_turns = bytes_to_float(_candata);   // 0x309: byte0-3 = pos_estimate [turn]
     origin_offset_valid = true;
-    const double inferred = est - origin_offset_turns;
-    RCLCPP_INFO(this->get_logger(), "ODrive基準位置を決定: pos_estimate=%.3f offset=%.0f 実位置推定=%.3f", est, origin_offset_turns, inferred);
+    RCLCPP_INFO(this->get_logger(), "ODrive基準位置を決定: origin=%.4f", origin_offset_turns);
 }
 
 void ChassisDriver::send_rpm(const double linear_vel, const double angular_vel){
