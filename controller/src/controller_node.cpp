@@ -23,6 +23,9 @@ steering_max_angle(dtor(get_parameter("steering_max.pos").as_double()))
 
     // 駆動系に電源が行っている可能性もあるのでリスタートする
     // publisher_restart->publish(*std::make_shared<std_msgs::msg::Empty>());
+
+    RCLCPP_INFO(this->get_logger(), "Controller Node has been started. max vel: %.2f m/s, steering angle: %.1f deg",
+        linear_max_vel, rtod(steering_max_angle));
 }
 
 void Controller::_subscriber_callback_joy(const sensor_msgs::msg::Joy::ConstSharedPtr msg){
