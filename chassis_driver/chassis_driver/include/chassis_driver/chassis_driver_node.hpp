@@ -75,6 +75,7 @@ private:
     const bool is_reverse_left;
     const bool is_reverse_right;
     const int caster_max_count;
+    const double caster_orientation_offset;
     const double caster_gear_ratio;
     const double caster_wheel_radius;
     const double reel_radius;
