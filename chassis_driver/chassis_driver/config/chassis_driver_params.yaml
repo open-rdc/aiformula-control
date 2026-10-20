@@ -30,7 +30,7 @@ chassis_driver_node:
     reverse_right_flag : false
     caster:
       max_count : 16384
-      # 直進姿勢での従動輪エンコーダの読み値[deg]（この値を引いて0degにする）
+      # 直進姿勢での従動輪エンコーダの読み値[deg]
       orientation_offset : -86.24
       gear_ratio : 0.59090909090909
       wheel_radius : 0.12 # [m]
