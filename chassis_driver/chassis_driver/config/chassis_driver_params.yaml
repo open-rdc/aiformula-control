@@ -15,7 +15,8 @@ launch: #起動パラメータ
       pos : 10.0
 
     tread : 0.6
-    wheelbase : 0.8
+    # 駆動軸からキャスター旋回軸までの距離[m]
+    wheelbase : 0.733
 
 controller_node:
   ros__parameters:
@@ -26,6 +27,8 @@ chassis_driver_node:
     interval_ms : 2
     wheel_radius : 0.124
     reduction_ratio : 1.0
+    # 左右の車輪速差から求まるヨーレートに対する実際のヨーレートの比
+    yaw_rate_ratio : 0.72
     reverse_left_flag : false
     reverse_right_flag : false
     caster:
@@ -38,10 +41,11 @@ chassis_driver_node:
       steering_radius : 0.032 # [m]
       preload_length : 0.03 # [m]
       preload_gain : 0.1
+    # 舵角誤差の補正ゲイン
     drive_pid:
-      p_gain : 3.0
-      i_gain : 0.2
-      d_gain : 0.1
+      p_gain : 4.0
+      i_gain : 1.0
+      d_gain : 0.0
 
 socketcan_interface_node:
   ros__parameters:

@@ -18,6 +18,7 @@ interval_ms(get_parameter("interval_ms").as_int()),
 wheel_radius(get_parameter("wheel_radius").as_double()),
 tread(get_parameter("tread").as_double()),
 wheelbase(get_parameter("wheelbase").as_double()),
+yaw_rate_ratio(get_parameter("yaw_rate_ratio").as_double()),
 rotate_ratio(1.0 / get_parameter("reduction_ratio").as_double()),
 is_reverse_left(get_parameter("reverse_left_flag").as_bool()),
 is_reverse_right(get_parameter("reverse_right_flag").as_bool()),
@@ -188,8 +189,14 @@ void ChassisDriver::_publisher_callback(){
     publisher_caster_data->publish(caster_data_msg);
 
 /*駆動輪制御*/
-    // 直進時にはプリロードがかかるため，トルク差は0にする
-    const double angular_command = (straight_flag ? 0 : 1) * drive_pid.cycle(caster_orientation, delta) * body_vel_squared;
+    // 舵角計測値のローパス（τ=30 ms）
+    caster_orientation_filtered += (caster_orientation - caster_orientation_filtered) * interval_ms / 30.0;
+    // 運動学による旋回指令に舵角誤差の補正を加える．
+    const double angular_ff = linear_vel * std::tan(delta) / (wheelbase * yaw_rate_ratio);
+    double angular_fb = 0.0;
+    if(linear_vel < 0.5 || straight_flag) drive_pid.reset();
+    else angular_fb = linear_vel * drive_pid.cycle(delta - caster_orientation_filtered);
+    const double angular_command = angular_ff + angular_fb;
     // RCLCPP_INFO(this->get_logger(), "ANG_CMD: %.2f", rtod(angular_command));
     send_rpm(linear_vel, angular_command);
 }
@@ -202,6 +209,8 @@ void ChassisDriver::_subscriber_callback_restart(const std_msgs::msg::Empty::Sha
     mode = Mode::stay;
     velplanner::Physics_t physics_zero(0.0, 0.0, 0.0);
     linear_planner.current(physics_zero);
+    drive_pid.reset();
+    caster_orientation_filtered = caster_orientation;
 
     // ODriveのAxis Stateをクローズドループに設定（axis_requested_state: 8）
     auto request = std::make_shared<odrive_can::srv::AxisState::Request>();

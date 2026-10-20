@@ -71,6 +71,7 @@ private:
     const double wheel_radius;
     const double tread;
     const double wheelbase;
+    const double yaw_rate_ratio;
     const double rotate_ratio;
     const bool is_reverse_left;
     const bool is_reverse_right;
@@ -86,6 +87,7 @@ private:
     // 変数
     double cmd_steering = 0.0;
     double caster_orientation = 0.0;
+    double caster_orientation_filtered = 0.0;
     geometry_msgs::msg::Twist current_body_vel;
     // キャスター回転角関連変数
     double caster_rotation = 0.0;
