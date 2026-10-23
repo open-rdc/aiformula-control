@@ -84,6 +84,7 @@ drive_pid(get_parameter("interval_ms").as_int())
     publisher_odrive = this->create_publisher<odrive_can::msg::ControlMessage>("/odrive_axis0/control_message", _qos);
     publisher_caster_data = this->create_publisher<std_msgs::msg::Float64MultiArray>("caster_data", _qos);
     publisher_odom = this->create_publisher<nav_msgs::msg::Odometry>("caster_odom", _qos);
+    publisher_body_vel = this->create_publisher<geometry_msgs::msg::TwistWithCovarianceStamped>("/chassis/velocity_body", _qos);
 
     // ODriveのAxis Stateサービスクライアント作成
     odrive_axis_client_ = this->create_client<odrive_can::srv::AxisState>("/odrive_axis0/request_axis_state");
@@ -321,6 +322,12 @@ void ChassisDriver::receive_rpm(uint8_t* candata){
 
     // 駆動輪の角速度 -> 車体速度
     current_body_vel = (right_vel + left_vel) * wheel_radius / 2.0;
+
+    geometry_msgs::msg::TwistWithCovarianceStamped body_vel_msg;
+    body_vel_msg.header.stamp = this->now();
+    body_vel_msg.header.frame_id = "base_link";
+    body_vel_msg.twist.twist.linear.x = current_body_vel;
+    publisher_body_vel->publish(body_vel_msg);
 
 }
 
