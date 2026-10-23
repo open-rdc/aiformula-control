@@ -195,10 +195,6 @@ void ChassisDriver::_publisher_callback(){
 }
 
 void ChassisDriver::_subscriber_callback_restart(const std_msgs::msg::Empty::SharedPtr msg){
-    if(!origin_offset_valid){
-        RCLCPP_WARN(this->get_logger(), "Odriveの基準位置が未設定です");
-        return;
-    }
     mode = Mode::stay;
     velplanner::Physics_t physics_zero(0.0, 0.0, 0.0);
     linear_planner.current(physics_zero);
