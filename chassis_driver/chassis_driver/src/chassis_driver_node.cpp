@@ -65,10 +65,10 @@ drive_pid(get_parameter("interval_ms").as_int())
         _qos,
         std::bind(&ChassisDriver::_subscriber_callback_emergency, this, std::placeholders::_1)
     );
-    _subscription_bodyvel = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(
-        "vectornav/velocity_body",
+    _subscription_rpm = this->create_subscription<socketcan_interface_msg::msg::SocketcanIF>(
+        "can_rx_711",
         _qos,
-        std::bind(&ChassisDriver::_subscriber_callback_bodyvel, this, std::placeholders::_1)
+        std::bind(&ChassisDriver::_subscriber_callback_rpm, this, std::placeholders::_1)
     );
     _subscription_odrive_heartbeat = this->create_subscription<socketcan_interface_msg::msg::SocketcanIF>(
         "can_rx_301",
@@ -160,7 +160,7 @@ void ChassisDriver::_publisher_callback(){
         delta = cmd_steering;
         driving_flag = true;
     }
-    const double body_vel_squared = current_body_vel.linear.x * current_body_vel.linear.x;
+    const double body_vel_squared = current_body_vel * current_body_vel;
 
     // モータ制御
     double motor_pos = 0.0;
@@ -264,9 +264,11 @@ void ChassisDriver::_subscriber_callback_emergency(const socketcan_interface_msg
         RCLCPP_INFO(this->get_logger(), "緊急停止!");
     }
 }
-void ChassisDriver::_subscriber_callback_bodyvel(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg){
-    current_body_vel = msg->twist.twist;
-    // RCLCPP_INFO(this->get_logger(), "VEL:%.2f", current_body_vel.linear.x);
+void ChassisDriver::_subscriber_callback_rpm(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){
+    if(msg->candlc < 8) return;
+    uint8_t _candata[8];
+    for(int i=0; i<msg->candlc; i++) _candata[i] = msg->candata[i];
+    receive_rpm(_candata);
 }
 
 void ChassisDriver::_subscriber_callback_odrive_heartbeat(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){
@@ -309,6 +311,16 @@ void ChassisDriver::send_rpm(const double linear_vel, const double angular_vel){
 
     for(int i=0; i<msg_can->candlc; i++) msg_can->candata[i]=_candata[i];
     publisher_can->publish(*msg_can);
+
+}
+void ChassisDriver::receive_rpm(uint8_t* candata){
+
+    // 回転方向制御  &  rpm -> rad/s
+    const double right_vel = (is_reverse_right ? -1 : 1) * bytes_to_int32(candata) * d_pi / 30.0 / rotate_ratio;
+    const double left_vel = (is_reverse_left ? -1 : 1) * bytes_to_int32(candata+4) * d_pi / 30.0 / rotate_ratio;
+
+    // 駆動輪の角速度 -> 車体速度
+    current_body_vel = (right_vel + left_vel) * wheel_radius / 2.0;
 
 }
 

@@ -26,7 +26,7 @@ chassis_driver_node:
     interval_ms : 2
     wheel_radius : 0.124
     reduction_ratio : 1.0
-    # 左右の車輪速差から求まるヨーレートに対する実際のヨーレートの比
+    # command / actualの比
     yaw_rate_ratio : 0.72
     reverse_left_flag : false
     reverse_right_flag : false
