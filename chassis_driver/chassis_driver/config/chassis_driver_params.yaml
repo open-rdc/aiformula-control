@@ -15,7 +15,7 @@ launch: #起動パラメータ
       pos : 10.0
 
     tread : 0.6
-    wheelbase : 0.8
+    wheelbase : 0.733
 
 controller_node:
   ros__parameters:
@@ -31,7 +31,7 @@ chassis_driver_node:
     caster:
       max_count : 16384
       # 直進姿勢での従動輪エンコーダの読み値[deg]
-      orientation_offset : -86.24
+      orientation_offset : 0.5
       gear_ratio : 0.59090909090909
       wheel_radius : 0.12 # [m]
       reel_radius : 0.02 # [m]
