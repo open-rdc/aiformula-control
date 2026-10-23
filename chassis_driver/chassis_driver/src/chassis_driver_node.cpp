@@ -18,6 +18,7 @@ interval_ms(get_parameter("interval_ms").as_int()),
 wheel_radius(get_parameter("wheel_radius").as_double()),
 tread(get_parameter("tread").as_double()),
 wheelbase(get_parameter("wheelbase").as_double()),
+yaw_rate_ratio(get_parameter("yaw_rate_ratio").as_double()),
 rotate_ratio(1.0 / get_parameter("reduction_ratio").as_double()),
 is_reverse_left(get_parameter("reverse_left_flag").as_bool()),
 is_reverse_right(get_parameter("reverse_right_flag").as_bool()),
@@ -64,10 +65,10 @@ drive_pid(get_parameter("interval_ms").as_int())
         _qos,
         std::bind(&ChassisDriver::_subscriber_callback_emergency, this, std::placeholders::_1)
     );
-    _subscription_bodyvel = this->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(
-        "vectornav/velocity_body",
+    _subscription_rpm = this->create_subscription<socketcan_interface_msg::msg::SocketcanIF>(
+        "can_rx_711",
         _qos,
-        std::bind(&ChassisDriver::_subscriber_callback_bodyvel, this, std::placeholders::_1)
+        std::bind(&ChassisDriver::_subscriber_callback_rpm, this, std::placeholders::_1)
     );
     _subscription_odrive_heartbeat = this->create_subscription<socketcan_interface_msg::msg::SocketcanIF>(
         "can_rx_301",
@@ -83,6 +84,7 @@ drive_pid(get_parameter("interval_ms").as_int())
     publisher_odrive = this->create_publisher<odrive_can::msg::ControlMessage>("/odrive_axis0/control_message", _qos);
     publisher_caster_data = this->create_publisher<std_msgs::msg::Float64MultiArray>("caster_data", _qos);
     publisher_odom = this->create_publisher<nav_msgs::msg::Odometry>("caster_odom", _qos);
+    publisher_body_vel = this->create_publisher<geometry_msgs::msg::TwistWithCovarianceStamped>("/chassis/velocity_body", _qos);
 
     // ODriveのAxis Stateサービスクライアント作成
     odrive_axis_client_ = this->create_client<odrive_can::srv::AxisState>("/odrive_axis0/request_axis_state");
@@ -159,7 +161,7 @@ void ChassisDriver::_publisher_callback(){
         delta = cmd_steering;
         driving_flag = true;
     }
-    const double body_vel_squared = current_body_vel.linear.x * current_body_vel.linear.x;
+    const double body_vel_squared = current_body_vel * current_body_vel;
 
     // モータ制御
     double motor_pos = 0.0;
@@ -188,8 +190,14 @@ void ChassisDriver::_publisher_callback(){
     publisher_caster_data->publish(caster_data_msg);
 
 /*駆動輪制御*/
-    // 直進時にはプリロードがかかるため，トルク差は0にする
-    const double angular_command = (straight_flag ? 0 : 1) * drive_pid.cycle(caster_orientation, delta) * body_vel_squared;
+    // 舵角計測値のローパス（τ=30 ms）
+    caster_orientation_filtered += (caster_orientation - caster_orientation_filtered) * interval_ms / 30.0;
+    // 運動学による旋回指令に舵角誤差の補正を加える．
+    const double angular_ff = linear_vel * std::tan(delta) / (wheelbase * yaw_rate_ratio);
+    double angular_fb = 0.0;
+    if(linear_vel < 0.5 || straight_flag) drive_pid.reset();
+    else angular_fb = linear_vel * drive_pid.cycle(delta - caster_orientation_filtered);
+    const double angular_command = angular_ff + angular_fb;
     // RCLCPP_INFO(this->get_logger(), "ANG_CMD: %.2f", rtod(angular_command));
     send_rpm(linear_vel, angular_command);
 }
@@ -198,6 +206,8 @@ void ChassisDriver::_subscriber_callback_restart(const std_msgs::msg::Empty::Sha
     mode = Mode::stay;
     velplanner::Physics_t physics_zero(0.0, 0.0, 0.0);
     linear_planner.current(physics_zero);
+    drive_pid.reset();
+    caster_orientation_filtered = caster_orientation;
 
     // ODriveのAxis Stateをクローズドループに設定（axis_requested_state: 8）
     auto request = std::make_shared<odrive_can::srv::AxisState::Request>();
@@ -255,9 +265,11 @@ void ChassisDriver::_subscriber_callback_emergency(const socketcan_interface_msg
         RCLCPP_INFO(this->get_logger(), "緊急停止!");
     }
 }
-void ChassisDriver::_subscriber_callback_bodyvel(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg){
-    current_body_vel = msg->twist.twist;
-    // RCLCPP_INFO(this->get_logger(), "VEL:%.2f", current_body_vel.linear.x);
+void ChassisDriver::_subscriber_callback_rpm(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){
+    if(msg->candlc < 8) return;
+    uint8_t _candata[8];
+    for(int i=0; i<msg->candlc; i++) _candata[i] = msg->candata[i];
+    receive_rpm(_candata);
 }
 
 void ChassisDriver::_subscriber_callback_odrive_heartbeat(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg){
@@ -300,6 +312,22 @@ void ChassisDriver::send_rpm(const double linear_vel, const double angular_vel){
 
     for(int i=0; i<msg_can->candlc; i++) msg_can->candata[i]=_candata[i];
     publisher_can->publish(*msg_can);
+
+}
+void ChassisDriver::receive_rpm(uint8_t* candata){
+
+    // 回転方向制御  &  rpm -> rad/s
+    const double right_vel = (is_reverse_right ? -1 : 1) * bytes_to_int32(candata) * d_pi / 30.0 / rotate_ratio;
+    const double left_vel = (is_reverse_left ? -1 : 1) * bytes_to_int32(candata+4) * d_pi / 30.0 / rotate_ratio;
+
+    // 駆動輪の角速度 -> 車体速度
+    current_body_vel = (right_vel + left_vel) * wheel_radius / 2.0;
+
+    geometry_msgs::msg::TwistWithCovarianceStamped body_vel_msg;
+    body_vel_msg.header.stamp = this->now();
+    body_vel_msg.header.frame_id = "base_link";
+    body_vel_msg.twist.twist.linear.x = current_body_vel;
+    publisher_body_vel->publish(body_vel_msg);
 
 }
 

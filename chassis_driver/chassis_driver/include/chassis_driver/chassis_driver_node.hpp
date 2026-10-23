@@ -1,7 +1,7 @@
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>
-#include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/quaternion.hpp>
 #include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
@@ -31,7 +31,7 @@ private:
     rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_caster_orientation;
     rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_caster_rotation;
     rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_emergency;
-    rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr _subscription_bodyvel;
+    rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_rpm;
     rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_odrive_heartbeat;
     rclcpp::Subscription<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr _subscription_odrive_estimate;
     rclcpp::TimerBase::SharedPtr _pub_timer;
@@ -41,17 +41,19 @@ private:
     void _subscriber_callback_caster_orientation(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
     void _subscriber_callback_caster_rotation(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
     void _subscriber_callback_emergency(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
-    void _subscriber_callback_bodyvel(const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg);
+    void _subscriber_callback_rpm(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
     void _subscriber_callback_odrive_heartbeat(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
     void _subscriber_callback_odrive_estimate(const socketcan_interface_msg::msg::SocketcanIF::SharedPtr msg);
     void _publisher_callback();
     void send_rpm(const double linear_vel, const double angular_vel);
+    void receive_rpm(uint8_t* candata);
     static double normalize_angle(double angle);
 
     rclcpp::Publisher<socketcan_interface_msg::msg::SocketcanIF>::SharedPtr publisher_can;
     rclcpp::Publisher<odrive_can::msg::ControlMessage>::SharedPtr publisher_odrive;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr publisher_caster_data;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr publisher_odom;
+    rclcpp::Publisher<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr publisher_body_vel;
 
     rclcpp::Client<odrive_can::srv::AxisState>::SharedPtr odrive_axis_client_;
 
@@ -71,6 +73,7 @@ private:
     const double wheel_radius;
     const double tread;
     const double wheelbase;
+    const double yaw_rate_ratio;
     const double rotate_ratio;
     const bool is_reverse_left;
     const bool is_reverse_right;
@@ -86,7 +89,8 @@ private:
     // 変数
     double cmd_steering = 0.0;
     double caster_orientation = 0.0;
-    geometry_msgs::msg::Twist current_body_vel;
+    double caster_orientation_filtered = 0.0;
+    double current_body_vel = 0.0;
     // キャスター回転角関連変数
     double caster_rotation = 0.0;
     int caster_rotation_lastcount = 0;
