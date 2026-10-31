@@ -5,6 +5,7 @@
 
 #include <float.h>
 #include <cmath>
+#include <algorithm>
 
 using namespace utils;
 
@@ -18,6 +19,7 @@ interval_ms(get_parameter("interval_ms").as_int()),
 wheel_radius(get_parameter("wheel_radius").as_double()),
 tread(get_parameter("tread").as_double()),
 wheelbase(get_parameter("wheelbase").as_double()),
+lateral_acc_max(get_parameter("lateral_acc_max").as_double()),
 yaw_rate_ratio(get_parameter("yaw_rate_ratio").as_double()),
 rotate_ratio(1.0 / get_parameter("reduction_ratio").as_double()),
 is_reverse_left(get_parameter("reverse_left_flag").as_bool()),
@@ -98,8 +100,8 @@ drive_pid(get_parameter("interval_ms").as_int())
     linear_planner.limit(linear_limit);
     drive_pid.gain(get_parameter("drive_pid.p_gain").as_double(), get_parameter("drive_pid.i_gain").as_double(), get_parameter("drive_pid.d_gain").as_double());
 
-    RCLCPP_INFO(this->get_logger(), "Chassis Driver Node has been started. max vel: %.2f m/s, steering angle: %.1f deg, caster offset: %.2f deg",
-        linear_limit.vel, rtod(steering_limit.pos), rtod(caster_orientation_offset));
+    RCLCPP_INFO(this->get_logger(), "Chassis Driver Node has been started. max vel: %.2f m/s, steering angle: %.1f deg, lateral acc: %.1f m/s^2, caster offset: %.2f deg",
+        linear_limit.vel, rtod(steering_limit.pos), lateral_acc_max, rtod(caster_orientation_offset));
 }
 
 void ChassisDriver::_subscriber_callback_vel(const steered_drive_msg::msg::SteeredDrive::SharedPtr msg){
@@ -158,7 +160,8 @@ void ChassisDriver::_publisher_callback(){
     double delta = 0.0;
     bool driving_flag = false;
     if(std::abs(linear_vel) > 0.1){
-        delta = cmd_steering;
+        const double steering_max = std::min(std::atan(lateral_acc_max * wheelbase / (linear_vel * linear_vel)), steering_limit.pos);
+        delta = constrain(cmd_steering, -steering_max, steering_max);
         driving_flag = true;
     }
     const double body_vel_squared = current_body_vel * current_body_vel;
