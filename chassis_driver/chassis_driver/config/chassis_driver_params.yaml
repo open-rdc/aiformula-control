@@ -12,7 +12,7 @@ launch: #起動パラメータ
       acc: 5.0
     # 舵角  位置[deg]
     steering_max :
-      pos : 10.0
+      pos : 15.0
 
     tread : 0.6
     wheelbase : 0.733
@@ -24,6 +24,7 @@ controller_node:
 chassis_driver_node:
   ros__parameters:
     interval_ms : 2
+    lateral_acc_max : 3.0
     wheel_radius : 0.124
     reduction_ratio : 1.0
     # command / actualの比

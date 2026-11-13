@@ -73,6 +73,7 @@ private:
     const double wheel_radius;
     const double tread;
     const double wheelbase;
+    const double lateral_acc_max;
     const double yaw_rate_ratio;
     const double rotate_ratio;
     const bool is_reverse_left;
