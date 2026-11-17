@@ -87,6 +87,7 @@ drive_pid(get_parameter("interval_ms").as_int())
     publisher_caster_data = this->create_publisher<std_msgs::msg::Float64MultiArray>("caster_data", _qos);
     publisher_odom = this->create_publisher<nav_msgs::msg::Odometry>("caster_odom", _qos);
     publisher_body_vel = this->create_publisher<geometry_msgs::msg::TwistWithCovarianceStamped>("/chassis/velocity_body", _qos);
+    publisher_diagnostic = this->create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/control/diagnostic", _qos);
 
     // ODriveのAxis Stateサービスクライアント作成
     odrive_axis_client_ = this->create_client<odrive_can::srv::AxisState>("/odrive_axis0/request_axis_state");
@@ -203,6 +204,27 @@ void ChassisDriver::_publisher_callback(){
     const double angular_command = angular_ff + angular_fb;
     // RCLCPP_INFO(this->get_logger(), "ANG_CMD: %.2f", rtod(angular_command));
     send_rpm(linear_vel, angular_command);
+
+    diagnostic_msgs::msg::DiagnosticArray diagnostic;
+    diagnostic.header.stamp = this->now();
+    diagnostic.status.resize(1);
+    diagnostic.status[0].name = "chassis_driver";
+    const auto add = [&diagnostic](const std::string& key, const double value){
+        diagnostic_msgs::msg::KeyValue key_value;
+        key_value.key = key;
+        key_value.value = std::to_string(value);
+        diagnostic.status[0].values.push_back(key_value);
+    };
+    add("linear_velocity", linear_vel);
+    add("body_velocity", current_body_vel);
+    add("steering_cmd", cmd_steering);
+    add("steering_target", delta);
+    add("steering_measured", caster_orientation);
+    add("steering_filtered", caster_orientation_filtered);
+    add("winding_length", winding_length);
+    add("angular_ff", angular_ff);
+    add("angular_fb", angular_fb);
+    publisher_diagnostic->publish(diagnostic);
 }
 
 void ChassisDriver::_subscriber_callback_restart(const std_msgs::msg::Empty::SharedPtr msg){
