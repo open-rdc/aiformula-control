@@ -57,6 +57,7 @@ def generate_launch_description():
         launch_discription.add_action(odrive_launch)
     if(launch_params['socketcan'] is True):
         launch_discription.add_action(socketcan_node)
+        launch_discription.add_action(launch.actions.ExecuteProcess(cmd=['candump', '-l', 'can_main']))
     if(launch_params['joy'] is True):
         launch_discription.add_action(joy_node)
 
