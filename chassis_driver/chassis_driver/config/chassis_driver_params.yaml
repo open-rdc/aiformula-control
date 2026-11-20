@@ -2,7 +2,8 @@ launch: #起動パラメータ
   ros__parameters:
     odrive : true
     socketcan : true
-    joy : true
+    # 遠隔操縦の選択 "rc" or "joy" 
+    teleop : "rc"
 
 /**:  #ワイルドカード(ここのパラメータは全ノードから読める: <名前に注意>)
   ros__parameters:
@@ -20,6 +21,8 @@ launch: #起動パラメータ
 controller_node:
   ros__parameters:
     linear_max_vel: 3.0
+    # rcのみ使用
+    timeout_ms: 200
 
 chassis_driver_node:
   ros__parameters:

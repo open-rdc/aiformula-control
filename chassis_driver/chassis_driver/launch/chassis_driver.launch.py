@@ -25,7 +25,7 @@ def generate_launch_description():
     chassis_driver_node = Node(
         package = 'chassis_driver',
         executable = 'chassis_driver',
-        parameters = [config_file_path],
+        parameters = [config_file_path, {'teleop': launch_params['teleop']}],
         output='screen'
     )
     # socketcanノードの作成
@@ -57,7 +57,7 @@ def generate_launch_description():
         launch_discription.add_action(odrive_launch)
     if(launch_params['socketcan'] is True):
         launch_discription.add_action(socketcan_node)
-    if(launch_params['joy'] is True):
+    if(launch_params['teleop'] == 'joy'):
         launch_discription.add_action(joy_node)
 
     launch_discription.add_action(chassis_driver_node)

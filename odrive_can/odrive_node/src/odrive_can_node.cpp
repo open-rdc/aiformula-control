@@ -47,13 +47,13 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
     rclcpp::Node::declare_parameter<uint16_t>("node_id", 0);
     rclcpp::Node::declare_parameter<bool>("axis_idle_on_shutdown", false);
 
-    rclcpp::QoS ctrl_stat_qos(rclcpp::KeepAll{});
+    rclcpp::QoS ctrl_stat_qos(rclcpp::KeepLast(10));
     ctrl_publisher_ = rclcpp::Node::create_publisher<ControllerStatus>("controller_status", ctrl_stat_qos);
 
-    rclcpp::QoS odrv_stat_qos(rclcpp::KeepAll{});
+    rclcpp::QoS odrv_stat_qos(rclcpp::KeepLast(10));
     odrv_publisher_ = rclcpp::Node::create_publisher<ODriveStatus>("odrive_status", odrv_stat_qos);
 
-    rclcpp::QoS ctrl_msg_qos(rclcpp::KeepAll{});
+    rclcpp::QoS ctrl_msg_qos(rclcpp::KeepLast(10));
     subscriber_ = rclcpp::Node::create_subscription<ControlMessage>("control_message", ctrl_msg_qos, std::bind(&ODriveCanNode::subscriber_callback, this, _1));
 
     srv_cb_group_ = rclcpp::Node::create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -63,7 +63,7 @@ ODriveCanNode::ODriveCanNode(const std::string& node_name) : rclcpp::Node(node_n
     rclcpp::QoS srv_clear_errors_qos(rclcpp::KeepAll{});
     service_clear_errors_ = rclcpp::Node::create_service<Empty>("clear_errors", std::bind(&ODriveCanNode::service_clear_errors_callback, this, _1, _2), srv_clear_errors_qos.get_rmw_qos_profile());
 
-    rclcpp::QoS can_qos(rclcpp::KeepAll{});
+    rclcpp::QoS can_qos(rclcpp::KeepLast(10));
     publisher_can = rclcpp::Node::create_publisher<socketcan_interface_msg::msg::SocketcanIF>("/can_tx", can_qos);
 }
 
